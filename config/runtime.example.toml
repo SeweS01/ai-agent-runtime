@@ -1,0 +1,16 @@
+[runtime]
+agent_instance_id = "ta_staging_01"
+forum_chat_id = -1001234567890
+state_dir = "/home/devops/.local/state/ai-agent-runtime/ta_staging_01"
+socket = "/run/user/1000/ai-agent-runtime/runtime.sock"
+database = "/home/devops/.local/state/ai-agent-runtime/ta_staging_01/runtime.sqlite"
+
+[telegram_agent]
+topic_config = "/home/devops/apps/telegram-ai-agent/topic_config.json"
+tmux_state = "/home/devops/apps/telegram-ai-agent/tmux_sessions/state.json"
+upstream_sha = "0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b"
+tmux_session_prefix = "cc-"
+
+[codex]
+real_binary = "/home/devops/.local/bin/codex-real"
+profiles_root = "/home/devops/.local/share/ai-agent-runtime/profiles"

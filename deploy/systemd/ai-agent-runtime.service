@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Agent Runtime daemon
+After=local-fs.target
+
+[Service]
+Type=notify
+ExecStart=%h/.local/bin/ai-agent-runtime --config %h/.config/ai-agent-runtime/config.toml serve
+Restart=always
+RestartSec=2s
+WatchdogSec=30s
+RuntimeDirectory=ai-agent-runtime
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
