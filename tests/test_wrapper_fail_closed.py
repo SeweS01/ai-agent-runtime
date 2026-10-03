@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ def test_agent_invocation_without_tmux_never_runs_real_codex(
     marker = tmp_path / "ran"
     real.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
     real.chmod(0o700)
+    real_digest = hashlib.sha256(real.read_bytes()).hexdigest()
     config = tmp_path / "config.toml"
     config.write_text(
         f"""
@@ -37,6 +39,8 @@ upstream_sha = "0000000000000000000000000000000000000000"
 
 [codex]
 real_binary = "{real}"
+version = "test-1"
+sha256 = "sha256:{real_digest}"
 profiles_root = "{tmp_path / "profiles"}"
 
 [policy]
@@ -59,6 +63,7 @@ def test_version_is_answered_locally_without_running_real_codex(
     marker = tmp_path / "ran"
     real.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
     real.chmod(0o700)
+    real_digest = hashlib.sha256(real.read_bytes()).hexdigest()
     config = tmp_path / "config.toml"
     config.write_text(
         f"""
@@ -73,6 +78,8 @@ upstream_sha = "0000000000000000000000000000000000000000"
 
 [codex]
 real_binary = "{real}"
+version = "test-1"
+sha256 = "sha256:{real_digest}"
 profiles_root = "{tmp_path / "profiles"}"
 
 [policy]

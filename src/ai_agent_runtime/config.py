@@ -29,6 +29,8 @@ class RuntimeConfig:
     socket_path: Path
     database_path: Path
     real_codex: Path
+    real_codex_version: str
+    real_codex_sha256: str
     profiles_root: Path
     topic_config_path: Path
     tmux_state_path: Path
@@ -46,6 +48,8 @@ class RuntimeConfig:
             socket_path=_xdg_runtime_dir() / "ai-agent-runtime" / "runtime.sock",
             database_path=state_dir / "runtime.sqlite",
             real_codex=Path.home() / ".local" / "bin" / "codex-real",
+            real_codex_version="",
+            real_codex_sha256="",
             profiles_root=Path.home() / ".local" / "share" / "ai-agent-runtime" / "profiles",
             topic_config_path=Path.home() / "apps" / "telegram-ai-agent" / "topic_config.json",
             tmux_state_path=Path.home()
@@ -76,6 +80,8 @@ class RuntimeConfig:
             socket_path=Path(runtime.get("socket", defaults.socket_path)).expanduser(),
             database_path=Path(runtime.get("database", state_dir / "runtime.sqlite")).expanduser(),
             real_codex=Path(codex.get("real_binary", defaults.real_codex)).expanduser(),
+            real_codex_version=str(codex.get("version", "")),
+            real_codex_sha256=str(codex.get("sha256", "")),
             profiles_root=Path(codex.get("profiles_root", defaults.profiles_root)).expanduser(),
             topic_config_path=Path(
                 telegram.get("topic_config", defaults.topic_config_path)
@@ -107,6 +113,14 @@ class RuntimeConfig:
             raise ValueError("policy.allowed_project_roots must not be empty")
         if any(not root.is_absolute() for root in self.allowed_project_roots):
             raise ValueError("every allowed project root must be absolute")
+        if not self.real_codex_version or len(self.real_codex_version) > 100:
+            raise ValueError("codex.version is required")
+        if (
+            not self.real_codex_sha256.startswith("sha256:")
+            or len(self.real_codex_sha256) != 71
+            or any(ch not in "0123456789abcdef" for ch in self.real_codex_sha256[7:])
+        ):
+            raise ValueError("codex.sha256 must be a sha256-prefixed lowercase digest")
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:

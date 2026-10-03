@@ -184,6 +184,30 @@ class LaunchSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingEvidenceInstance:
+    instance_id: str
+    binding_id: str
+    wrapper_pid: int
+    wrapper_starttime: int
+    child_pid: int
+    child_starttime: int
+    tmux_session: str
+    tmux_pane: str
+    launch_spec: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredInstance:
+    instance_id: str
+    binding_id: str
+    wrapper_pid: int
+    wrapper_starttime: int
+    tmux_session: str
+    tmux_pane: str
+    launch_spec: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class ObservedSpecProposal:
     binding_id: str
     base_generation_id: str

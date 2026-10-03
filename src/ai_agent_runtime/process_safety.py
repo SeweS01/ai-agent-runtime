@@ -38,6 +38,21 @@ def proc_uid(pid: int) -> int:
     return Path(f"/proc/{pid}").stat().st_uid
 
 
+def proc_parent_pid(pid: int) -> int:
+    for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
+        if line.startswith("PPid:"):
+            return int(line.partition(":")[2].strip())
+    raise ValueError("process status has no PPid")
+
+
+def proc_cmdline(pid: int) -> tuple[str, ...]:
+    return tuple(
+        item.decode(errors="strict")
+        for item in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        if item
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TmuxPaneProcess:
     pane_id: str
@@ -201,3 +216,58 @@ def profile_fingerprint(path: Path) -> str:
         )
     ).encode()
     return f"sha256:{hashlib.sha256(material).hexdigest()}"
+
+
+def verify_codex_child(
+    *,
+    child_pid: int,
+    child_starttime: int,
+    wrapper_pid: int,
+    codex_home: Path,
+    model: str,
+    reasoning_effort: str,
+    real_codex: Path,
+) -> dict[str, object]:
+    if proc_uid(child_pid) != os.getuid():
+        raise RuntimeFailureError(ErrorCode.CORRELATION_MISMATCH, "child UID mismatch")
+    if proc_starttime(child_pid) != child_starttime:
+        raise RuntimeFailureError(ErrorCode.CORRELATION_MISMATCH, "child starttime mismatch")
+    if proc_parent_pid(child_pid) != wrapper_pid:
+        raise RuntimeFailureError(ErrorCode.CORRELATION_MISMATCH, "child parent mismatch")
+    environment = proc_environment(child_pid)
+    if environment.get("CODEX_HOME") != str(codex_home):
+        raise RuntimeFailureError(ErrorCode.CORRELATION_MISMATCH, "child CODEX_HOME mismatch")
+    argv = proc_cmdline(child_pid)
+    if str(real_codex) not in argv:
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH, "real Codex path absent from child argv"
+        )
+    try:
+        model_index = argv.index("--model")
+        actual_model = argv[model_index + 1]
+    except (ValueError, IndexError) as exc:
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH, "child model argument is absent"
+        ) from exc
+    if actual_model != model:
+        raise RuntimeFailureError(ErrorCode.CORRELATION_MISMATCH, "child model mismatch")
+    expected_reasoning = f"model_reasoning_effort={reasoning_effort}"
+    if not any(
+        argv[index] == "-c" and index + 1 < len(argv) and argv[index + 1] == expected_reasoning
+        for index in range(len(argv))
+    ):
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH, "child reasoning argument mismatch"
+        )
+    binary_stat = real_codex.stat()
+    return {
+        "actual_codex_home": str(codex_home),
+        "actual_model": actual_model,
+        "actual_reasoning_effort": reasoning_effort,
+        "real_codex_path": str(real_codex),
+        "real_codex_device": binary_stat.st_dev,
+        "real_codex_inode": binary_stat.st_ino,
+        "real_codex_sha256": file_sha256(real_codex),
+        "child_pid": child_pid,
+        "child_starttime": child_starttime,
+    }

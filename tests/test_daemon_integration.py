@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import uuid
@@ -12,7 +13,7 @@ from ai_agent_runtime.daemon.server import RuntimeServer
 from ai_agent_runtime.domain import DesiredSpec, RuntimeBinding
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
-from ai_agent_runtime.process_safety import proc_starttime
+from ai_agent_runtime.process_safety import proc_starttime, profile_fingerprint
 from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
 
@@ -49,6 +50,8 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         socket_path=tmp_path / "run" / "runtime.sock",
         database_path=tmp_path / "runtime-state" / "runtime.sqlite",
         real_codex=real_codex,
+        real_codex_version="test-1",
+        real_codex_sha256=f"sha256:{hashlib.sha256(real_codex.read_bytes()).hexdigest()}",
         profiles_root=profiles,
         topic_config_path=topic_config,
         tmux_state_path=tmux_state,
@@ -59,6 +62,8 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         config,
         phase_b_timeout=1.0,
         identity_verifier=lambda _identity: None,
+        child_verifier=lambda **_kwargs: {},
+        evidence_interval=0.01,
     )
     binding = RuntimeBinding(
         binding_id="binding-1",
@@ -83,7 +88,11 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         generation_id="gen-1",
         revision=1,
     )
-    daemon.store.put_effective_spec(spec, codex_home=profile, profile_fingerprint="fp")
+    daemon.store.put_effective_spec(
+        spec,
+        codex_home=profile,
+        profile_fingerprint=profile_fingerprint(profile),
+    )
 
     server_task = asyncio.create_task(daemon.serve())
     for _ in range(100):
@@ -112,6 +121,9 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert registration["binding_id"] == "binding-1"
     assert registration["spec"]["spec_digest"] == spec.spec_digest
 
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text("{}\n", encoding="utf-8")
+    rollout.chmod(0o600)
     tmux_state.write_text(
         json.dumps(
             {
@@ -120,6 +132,7 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
                     "cwd": str(project),
                     "provider": "codex",
                     "session_id": "session-1",
+                    "transcript_path": str(rollout),
                 }
             }
         ),
@@ -141,7 +154,14 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert verified["ok"] is True
     assert verified["applied"] is False
     assert verified["session_id"] == "session-1"
-    assert daemon.store.session_owner("session-1") is None
+    for _ in range(100):
+        if daemon.store.session_owner("session-1") is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert daemon.store.session_owner("session-1") == ("binding-1", "work")
+    evidence = daemon.store.get_applied_evidence(registration["instance_id"])
+    assert evidence is not None
+    assert evidence["rollout_inode"] == rollout.stat().st_ino
 
     server_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -185,6 +205,8 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
         socket_path=tmp_path / "run" / "runtime.sock",
         database_path=tmp_path / "runtime-state" / "runtime.sqlite",
         real_codex=real_codex,
+        real_codex_version="test-1",
+        real_codex_sha256=f"sha256:{hashlib.sha256(real_codex.read_bytes()).hexdigest()}",
         profiles_root=profiles,
         topic_config_path=topic_config,
         tmux_state_path=tmp_path / "tmux_state.json",
@@ -231,7 +253,11 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
         desired=desired_payload,
     )
 
-    daemon = RuntimeServer(config, identity_verifier=lambda _identity: None)
+    daemon = RuntimeServer(
+        config,
+        identity_verifier=lambda _identity: None,
+        child_verifier=lambda **_kwargs: {},
+    )
     server_task = asyncio.create_task(daemon.serve())
     for _ in range(100):
         if config.socket_path.exists():
@@ -287,7 +313,11 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
     with contextlib.suppress(asyncio.CancelledError):
         await server_task
 
-    restarted = RuntimeServer(config, identity_verifier=lambda _identity: None)
+    restarted = RuntimeServer(
+        config,
+        identity_verifier=lambda _identity: None,
+        child_verifier=lambda **_kwargs: {},
+    )
     restarted_task = asyncio.create_task(restarted.serve())
     for _ in range(100):
         if config.socket_path.exists():

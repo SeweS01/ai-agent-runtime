@@ -15,6 +15,7 @@ class UpstreamTmuxState:
     cwd: str
     provider: str
     session_id: str | None
+    transcript_path: str | None
 
 
 def read_tmux_states(path: Path) -> tuple[UpstreamTmuxState, ...]:
@@ -41,6 +42,7 @@ def read_tmux_states(path: Path) -> tuple[UpstreamTmuxState, ...]:
             continue
         provider = value.get("provider", "claude")
         session_id = value.get("session_id")
+        transcript_path = value.get("transcript_path")
         states.append(
             UpstreamTmuxState(
                 chat_id=chat_id,
@@ -49,6 +51,7 @@ def read_tmux_states(path: Path) -> tuple[UpstreamTmuxState, ...]:
                 cwd=cwd,
                 provider=str(provider),
                 session_id=session_id if isinstance(session_id, str) else None,
+                transcript_path=(transcript_path if isinstance(transcript_path, str) else None),
             )
         )
     return tuple(states)

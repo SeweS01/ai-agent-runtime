@@ -13,6 +13,8 @@ tmux_session_prefix = "cc-"
 
 [codex]
 real_binary = "/home/devops/.local/bin/codex-real"
+version = "0.0.0-qualified-placeholder"
+sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 profiles_root = "/home/devops/.local/share/ai-agent-runtime/profiles"
 
 [policy]

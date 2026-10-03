@@ -12,6 +12,8 @@ from ai_agent_runtime.domain import (
     DesiredSpec,
     ManagementMode,
     ObservedSpecProposal,
+    PendingEvidenceInstance,
+    RegisteredInstance,
     RuntimeBinding,
     sha256_digest,
 )
@@ -65,6 +67,7 @@ CREATE TABLE IF NOT EXISTS instances (
     tmux_pane TEXT NOT NULL,
     lifecycle TEXT NOT NULL,
     applied_digest TEXT,
+    launch_spec_json TEXT,
     updated_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS outbox (
@@ -82,6 +85,15 @@ CREATE TABLE IF NOT EXISTS request_results (
     request_digest TEXT NOT NULL,
     response_json TEXT NOT NULL,
     created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS applied_specs (
+    instance_id TEXT PRIMARY KEY REFERENCES instances(instance_id) ON DELETE CASCADE,
+    binding_id TEXT NOT NULL REFERENCES bindings(binding_id),
+    generation_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    spec_digest TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    verified_at REAL NOT NULL
 );
 """
 
@@ -103,6 +115,7 @@ class RuntimeStore:
             "management_mode",
             "TEXT NOT NULL DEFAULT 'MANAGED'",
         )
+        self._ensure_column("instances", "launch_spec_json", "TEXT")
         self._connection.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '1')"
         )
@@ -314,19 +327,30 @@ class RuntimeStore:
         tmux_pane: str,
         lifecycle: str,
         applied_digest: str | None,
+        launch_spec: dict[str, object] | None = None,
     ) -> None:
+        encoded_launch = (
+            json.dumps(launch_spec, sort_keys=True, separators=(",", ":"))
+            if launch_spec is not None
+            else None
+        )
         with self._connection:
             self._connection.execute(
                 """
                 INSERT INTO instances(
                     instance_id, binding_id, wrapper_pid, wrapper_starttime, child_pid,
-                    child_starttime, tmux_session, tmux_pane, lifecycle, applied_digest, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    child_starttime, tmux_session, tmux_pane, lifecycle, applied_digest,
+                    launch_spec_json, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(instance_id) DO UPDATE SET
                     child_pid=excluded.child_pid,
                     child_starttime=excluded.child_starttime,
                     lifecycle=excluded.lifecycle,
                     applied_digest=excluded.applied_digest,
+                    launch_spec_json=COALESCE(
+                        excluded.launch_spec_json,
+                        instances.launch_spec_json
+                    ),
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -340,9 +364,151 @@ class RuntimeStore:
                     tmux_pane,
                     lifecycle,
                     applied_digest,
+                    encoded_launch,
                     time.time(),
                 ),
             )
+
+    def get_registered_instance(self, instance_id: str) -> RegisteredInstance | None:
+        row = self._connection.execute(
+            """
+            SELECT instance_id, binding_id, wrapper_pid, wrapper_starttime,
+                   tmux_session, tmux_pane, launch_spec_json
+            FROM instances WHERE instance_id=?
+            """,
+            (instance_id,),
+        ).fetchone()
+        if row is None or row["launch_spec_json"] is None:
+            return None
+        launch_spec = json.loads(row["launch_spec_json"])
+        if not isinstance(launch_spec, dict):
+            raise ValueError("persisted instance launch spec is invalid")
+        return RegisteredInstance(
+            instance_id=row["instance_id"],
+            binding_id=row["binding_id"],
+            wrapper_pid=row["wrapper_pid"],
+            wrapper_starttime=row["wrapper_starttime"],
+            tmux_session=row["tmux_session"],
+            tmux_pane=row["tmux_pane"],
+            launch_spec=launch_spec,
+        )
+
+    def pending_evidence_instances(self) -> tuple[PendingEvidenceInstance, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT instance_id, binding_id, wrapper_pid, wrapper_starttime,
+                   child_pid, child_starttime, tmux_session, tmux_pane,
+                   launch_spec_json
+            FROM instances
+            WHERE child_pid IS NOT NULL
+              AND child_starttime IS NOT NULL
+              AND applied_digest IS NULL
+              AND lifecycle IN ('IDLE', 'BUSY')
+              AND launch_spec_json IS NOT NULL
+            ORDER BY updated_at
+            """
+        ).fetchall()
+        return tuple(
+            PendingEvidenceInstance(
+                instance_id=row["instance_id"],
+                binding_id=row["binding_id"],
+                wrapper_pid=row["wrapper_pid"],
+                wrapper_starttime=row["wrapper_starttime"],
+                child_pid=row["child_pid"],
+                child_starttime=row["child_starttime"],
+                tmux_session=row["tmux_session"],
+                tmux_pane=row["tmux_pane"],
+                launch_spec=json.loads(row["launch_spec_json"]),
+            )
+            for row in rows
+        )
+
+    def record_applied_spec(
+        self,
+        *,
+        instance_id: str,
+        binding_id: str,
+        spec: DesiredSpec,
+        evidence: dict[str, object],
+        session_id: str,
+        account_profile: str,
+        rollout_path: str,
+        rollout_device: int,
+        rollout_inode: int,
+    ) -> None:
+        encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+        with self._connection:
+            existing = self.session_owner(session_id)
+            expected_owner = (binding_id, account_profile)
+            if existing is not None and existing != expected_owner:
+                raise ValueError("session provenance is immutable")
+            self._connection.execute(
+                """
+                INSERT INTO session_provenance(
+                    session_id, binding_id, account_profile, rollout_path,
+                    rollout_device, rollout_inode, observed_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    rollout_path=excluded.rollout_path,
+                    rollout_device=excluded.rollout_device,
+                    rollout_inode=excluded.rollout_inode,
+                    observed_at=excluded.observed_at
+                """,
+                (
+                    session_id,
+                    binding_id,
+                    account_profile,
+                    rollout_path,
+                    rollout_device,
+                    rollout_inode,
+                    time.time(),
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO applied_specs(
+                    instance_id, binding_id, generation_id, revision,
+                    spec_digest, evidence_json, verified_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(instance_id) DO UPDATE SET
+                    binding_id=excluded.binding_id,
+                    generation_id=excluded.generation_id,
+                    revision=excluded.revision,
+                    spec_digest=excluded.spec_digest,
+                    evidence_json=excluded.evidence_json,
+                    verified_at=excluded.verified_at
+                """,
+                (
+                    instance_id,
+                    binding_id,
+                    spec.generation_id,
+                    spec.revision,
+                    spec.spec_digest,
+                    encoded,
+                    time.time(),
+                ),
+            )
+            cursor = self._connection.execute(
+                """
+                UPDATE instances SET applied_digest=?, updated_at=?
+                WHERE instance_id=? AND binding_id=?
+                """,
+                (spec.spec_digest, time.time(), instance_id, binding_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown instance: {instance_id}")
+
+    def get_applied_evidence(self, instance_id: str) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT evidence_json FROM applied_specs WHERE instance_id=?",
+            (instance_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        decoded = json.loads(row["evidence_json"])
+        if not isinstance(decoded, dict):
+            raise ValueError("persisted AppliedSpec evidence is invalid")
+        return decoded
 
     def session_owner(self, session_id: str) -> tuple[str, str] | None:
         row = self._connection.execute(
