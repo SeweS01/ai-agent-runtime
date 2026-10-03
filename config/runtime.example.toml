@@ -14,3 +14,6 @@ tmux_session_prefix = "cc-"
 [codex]
 real_binary = "/home/devops/.local/bin/codex-real"
 profiles_root = "/home/devops/.local/share/ai-agent-runtime/profiles"
+
+[policy]
+allowed_project_roots = ["/home/devops/workspace"]

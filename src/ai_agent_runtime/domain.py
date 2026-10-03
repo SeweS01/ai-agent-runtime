@@ -158,6 +158,8 @@ class RuntimeBinding:
     canonical_cwd: str
     expected_tmux_session: str
     configured: bool = True
+    config_digest: str | None = None
+    management_mode: ManagementMode = ManagementMode.MANAGED
 
 
 @dataclass(frozen=True, slots=True)

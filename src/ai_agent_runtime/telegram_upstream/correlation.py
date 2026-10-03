@@ -32,6 +32,13 @@ def phase_a_correlate(
             ErrorCode.AMBIGUOUS, "multiple bindings match tmux identity and cwd"
         )
     binding = candidates[0]
+    if binding.management_mode.value != "MANAGED":
+        raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "binding is currently unmanaged")
+    if binding.config_digest != topic_config.digest:
+        raise RuntimeFailureError(
+            ErrorCode.CONFIG_DRIFT,
+            "fresh topic_config digest has not been reconciled",
+        )
     entry = topic_config.topic(binding.thread_id)
     if entry is None:
         raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, "upstream topic key is absent")

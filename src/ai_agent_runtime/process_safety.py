@@ -60,3 +60,43 @@ def validate_profile_path(path: Path, *, root: Path, uid: int | None = None) -> 
     if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise RuntimeFailureError(ErrorCode.UNSAFE_PROFILE, "CODEX_HOME is group/world writable")
     return resolved
+
+
+def validate_project_path(path: Path, *, allowed_roots: tuple[Path, ...]) -> Path:
+    resolved = path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError("project cwd is not a directory")
+    roots = tuple(root.resolve(strict=True) for root in allowed_roots)
+    if not any(resolved == root or root in resolved.parents for root in roots):
+        raise ValueError("project cwd is outside allowed project roots")
+    return resolved
+
+
+def profile_fingerprint(path: Path) -> str:
+    """Fingerprint profile identity/metadata without reading credential content."""
+
+    resolved = path.resolve(strict=True)
+    profile_stat = resolved.stat()
+    auth_path = resolved / "auth.json"
+    auth_metadata: tuple[int, int, int, int] | None = None
+    if auth_path.exists():
+        auth_stat = auth_path.stat(follow_symlinks=False)
+        if stat.S_ISLNK(auth_stat.st_mode):
+            raise RuntimeFailureError(ErrorCode.UNSAFE_PROFILE, "auth.json must not be a symlink")
+        auth_metadata = (
+            auth_stat.st_uid,
+            stat.S_IMODE(auth_stat.st_mode),
+            auth_stat.st_size,
+            auth_stat.st_mtime_ns,
+        )
+    material = repr(
+        (
+            str(resolved),
+            profile_stat.st_dev,
+            profile_stat.st_ino,
+            profile_stat.st_uid,
+            stat.S_IMODE(profile_stat.st_mode),
+            auth_metadata,
+        )
+    ).encode()
+    return f"sha256:{hashlib.sha256(material).hexdigest()}"

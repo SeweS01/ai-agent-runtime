@@ -9,18 +9,35 @@ import socket
 import struct
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from ai_agent_runtime.config import RuntimeConfig
-from ai_agent_runtime.domain import LifecycleState, WrapperIdentity
+from ai_agent_runtime.domain import (
+    DesiredSpec,
+    LifecycleState,
+    ManagementMode,
+    RuntimeBinding,
+    WrapperIdentity,
+    sha256_digest,
+)
 from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 from ai_agent_runtime.ipc.protocol import read_frame, validate_version, versioned, write_frame
-from ai_agent_runtime.process_safety import validate_owned_executable, validate_profile_path
+from ai_agent_runtime.process_safety import (
+    profile_fingerprint,
+    validate_owned_executable,
+    validate_profile_path,
+    validate_project_path,
+)
 from ai_agent_runtime.state.store import RuntimeStore
 from ai_agent_runtime.systemd_notify import notify, watchdog_loop
+from ai_agent_runtime.telegram_upstream.adapter import TelegramUpstreamAdapter
 from ai_agent_runtime.telegram_upstream.correlation import phase_a_correlate, phase_b_verify
 from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
-from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
+from ai_agent_runtime.telegram_upstream.topic_config import (
+    read_topic_config,
+    reconcile_managed_topic,
+)
 
 _PEERCRED = struct.Struct("3i")
 
@@ -31,7 +48,7 @@ class RuntimeServer:
         self.phase_b_timeout = phase_b_timeout
         self.store = RuntimeStore(config.database_path)
         self.boot_id = str(uuid.uuid4())
-        self._results: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._results: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
 
     async def serve(self) -> None:
         self.config.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -40,6 +57,7 @@ class RuntimeServer:
         server = await asyncio.start_unix_server(self._handle, path=self.config.socket_path)
         os.chmod(self.config.socket_path, 0o600)
         watchdog = asyncio.create_task(watchdog_loop())
+        reconciler = asyncio.create_task(self._reconcile_topic_config_loop())
         notify("READY=1")
         try:
             async with server:
@@ -47,8 +65,11 @@ class RuntimeServer:
         finally:
             notify("STOPPING=1")
             watchdog.cancel()
+            reconciler.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watchdog
+            with contextlib.suppress(asyncio.CancelledError):
+                await reconciler
             self.config.socket_path.unlink(missing_ok=True)
             self.store.close()
 
@@ -63,9 +84,22 @@ class RuntimeServer:
             payload = await read_frame(reader)
             validate_version(payload)
             request_id = _required_str(payload, "request_id")
-            cached = self._results.get(request_id)
-            if cached is not None:
-                await write_frame(writer, cached)
+            request_digest = sha256_digest(payload)
+            cached_memory = self._results.get(request_id)
+            if cached_memory is not None:
+                cached_digest, cached_response = cached_memory
+                if cached_digest != request_digest:
+                    raise RuntimeFailureError(
+                        ErrorCode.INVALID_REQUEST,
+                        "request_id replayed with different payload",
+                    )
+                await write_frame(writer, cached_response)
+                return
+            cached_durable = self.store.get_request_result(request_id, request_digest)
+            if cached_durable is not None:
+                cached_response = dict(cached_durable)
+                cached_response["daemon_boot_id"] = self.boot_id
+                await write_frame(writer, cached_response)
                 return
             action = _required_str(payload, "action")
             if action == "register":
@@ -74,9 +108,11 @@ class RuntimeServer:
                 response = await self._verify_started(request_id, payload, peer_pid, peer_uid)
             elif action == "status":
                 response = self._ok(request_id, summary=self.store.summary())
+            elif action == "apply_binding":
+                response = self._apply_binding(request_id, payload)
             else:
                 raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, f"unknown action: {action}")
-            self._cache(request_id, response)
+            self._cache(request_id, request_digest, response)
             await write_frame(writer, response)
         except RuntimeFailureError as exc:
             await write_frame(writer, self._error(request_id, exc.code, exc.detail))
@@ -170,6 +206,149 @@ class RuntimeServer:
             },
         )
 
+    def _apply_binding(self, request_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_binding = payload.get("binding")
+        raw_desired = payload.get("desired")
+        if not isinstance(raw_binding, dict) or not isinstance(raw_desired, dict):
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "binding and desired objects are required",
+            )
+        agent_instance_id = _required_str(raw_binding, "agent_instance_id")
+        if agent_instance_id != self.config.agent_instance_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance mismatch")
+        chat_id = _required_int(raw_binding, "chat_id")
+        if chat_id != self.config.forum_chat_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "forum chat mismatch")
+        thread_id = _required_int(raw_binding, "thread_id")
+        if thread_id <= 0:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "thread_id must be positive")
+        binding_id = _required_str(raw_binding, "binding_id")
+        project_id = _required_str(raw_binding, "project_id")
+        requested_cwd = validate_project_path(
+            Path(_required_str(raw_binding, "canonical_cwd")),
+            allowed_roots=self.config.allowed_project_roots,
+        )
+        if raw_desired.get("binding_id") != binding_id:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "desired binding_id mismatch")
+        spec = _desired_spec(raw_desired)
+        if spec.agent_instance_id != agent_instance_id:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "desired AgentInstance mismatch")
+        if spec.project_id != project_id or Path(spec.canonical_cwd) != requested_cwd:
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST, "desired project identity mismatch"
+            )
+        if spec.provider != "codex":
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST, "V1 managed provider must be codex"
+            )
+        existing_binding = self.store.get_binding(binding_id)
+        if existing_binding is not None:
+            if (
+                existing_binding.agent_instance_id != agent_instance_id
+                or existing_binding.chat_id != chat_id
+                or existing_binding.thread_id != thread_id
+                or existing_binding.project_id != project_id
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "binding identity is immutable",
+                )
+            if Path(existing_binding.canonical_cwd) != requested_cwd:
+                raise RuntimeFailureError(
+                    ErrorCode.PROJECT_RELOCATION_REQUIRED,
+                    "project path change requires explicit relocation",
+                )
+        for known in self.store.list_bindings(agent_instance_id):
+            if (
+                known.chat_id == chat_id
+                and known.thread_id == thread_id
+                and known.binding_id != binding_id
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "Telegram topic is already assigned to another binding",
+                )
+        try:
+            self.store.validate_effective_spec_update(spec)
+        except ValueError as exc:
+            code = (
+                ErrorCode.GENERATION_RECONCILE_REQUIRED
+                if "generation" in str(exc)
+                else ErrorCode.INVALID_REQUEST
+            )
+            raise RuntimeFailureError(code, str(exc)) from exc
+        profile_name = spec.account_profile
+        if (
+            not profile_name
+            or profile_name in {".", ".."}
+            or Path(profile_name).name != profile_name
+        ):
+            raise RuntimeFailureError(ErrorCode.UNSAFE_PROFILE, "invalid account profile name")
+        codex_home = validate_profile_path(
+            self.config.profiles_root / profile_name,
+            root=self.config.profiles_root,
+        )
+        fingerprint = profile_fingerprint(codex_home)
+        adapter = TelegramUpstreamAdapter(
+            self.config.upstream_sha,
+            self.config.tmux_session_prefix,
+        )
+        expected_session = adapter.expected_session_name(
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+        snapshot = None
+        for _ in range(3):
+            before = read_topic_config(self.config.topic_config_path)
+            try:
+                snapshot = reconcile_managed_topic(
+                    self.config.topic_config_path,
+                    thread_id=thread_id,
+                    cwd=str(requested_cwd),
+                    expected_digest=before.digest,
+                    backup_dir=self.config.state_dir / "topic-config-backups",
+                )
+                break
+            except KeyError as exc:
+                raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
+            except RuntimeError:
+                continue
+        if snapshot is None:
+            raise RuntimeFailureError(
+                ErrorCode.CONFIG_DRIFT,
+                "topic_config changed during all reconciliation attempts",
+            )
+        binding = RuntimeBinding(
+            binding_id=binding_id,
+            agent_instance_id=agent_instance_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            project_id=project_id,
+            canonical_cwd=str(requested_cwd),
+            expected_tmux_session=expected_session,
+            configured=True,
+            config_digest=snapshot.digest,
+            management_mode=ManagementMode.MANAGED,
+        )
+        self.store.upsert_binding(binding)
+        self.store.put_effective_spec(
+            spec,
+            codex_home=codex_home,
+            profile_fingerprint=fingerprint,
+        )
+        return self._ok(
+            request_id,
+            binding_id=binding_id,
+            config_digest=snapshot.digest,
+            local_effective={
+                "generation_id": spec.generation_id,
+                "revision": spec.revision,
+                "spec_digest": spec.spec_digest,
+                "profile_fingerprint": fingerprint,
+            },
+        )
+
     async def _verify_started(
         self,
         request_id: str,
@@ -227,9 +406,43 @@ class RuntimeServer:
             )
         return self._ok(request_id, verified=True, session_id=state.session_id)
 
-    def _cache(self, request_id: str, result: dict[str, Any]) -> None:
-        self._results[request_id] = result
+    async def _reconcile_topic_config_loop(self) -> None:
+        while True:
+            try:
+                snapshot = read_topic_config(self.config.topic_config_path)
+                for binding in self.store.list_bindings(self.config.agent_instance_id):
+                    entry = snapshot.topic(binding.thread_id)
+                    if entry is None:
+                        continue
+                    if entry.engine != "codex":
+                        mode = ManagementMode.UNMANAGED
+                    elif entry.exec_mode != "tmux":
+                        mode = ManagementMode.UNSUPPORTED_CODEX_SUBPROCESS
+                    elif (
+                        entry.cwd is not None
+                        and Path(entry.cwd).resolve() == Path(binding.canonical_cwd).resolve()
+                    ):
+                        mode = ManagementMode.MANAGED
+                    else:
+                        continue
+                    self.store.update_binding_observation(
+                        binding.binding_id,
+                        config_digest=snapshot.digest,
+                        management_mode=mode,
+                    )
+            except (OSError, ValueError):
+                pass
+            await asyncio.sleep(1.0)
+
+    def _cache(
+        self,
+        request_id: str,
+        request_digest: str,
+        result: dict[str, Any],
+    ) -> None:
+        self._results[request_id] = (request_digest, result)
         self._results.move_to_end(request_id)
+        self.store.put_request_result(request_id, request_digest, result)
         while len(self._results) > 1024:
             self._results.popitem(last=False)
 
@@ -291,3 +504,25 @@ def _verify_claimed_peer(
             ErrorCode.INVALID_REQUEST,
             "claimed wrapper PID/UID does not match Unix peer credentials",
         )
+
+
+def _desired_spec(payload: dict[str, Any]) -> DesiredSpec:
+    try:
+        spec = DesiredSpec(
+            binding_id=_required_str(payload, "binding_id"),
+            agent_instance_id=_required_str(payload, "agent_instance_id"),
+            project_id=_required_str(payload, "project_id"),
+            canonical_cwd=_required_str(payload, "canonical_cwd"),
+            provider=_required_str(payload, "provider"),
+            account_profile=_required_str(payload, "account_profile"),
+            model=_required_str(payload, "model"),
+            reasoning_effort=_required_str(payload, "reasoning_effort"),
+            generation_id=_required_str(payload, "generation_id"),
+            revision=_required_int(payload, "revision"),
+            spec_digest=_required_str(payload, "spec_digest"),
+        )
+    except TypeError as exc:
+        raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
+    if not spec.verify_digest():
+        raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "desired spec digest mismatch")
+    return spec

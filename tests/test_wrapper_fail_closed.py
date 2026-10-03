@@ -29,6 +29,9 @@ upstream_sha = "0000000000000000000000000000000000000000"
 [codex]
 real_binary = "{real}"
 profiles_root = "{tmp_path / "profiles"}"
+
+[policy]
+allowed_project_roots = ["{tmp_path}"]
 """,
         encoding="utf-8",
     )
@@ -62,6 +65,9 @@ upstream_sha = "0000000000000000000000000000000000000000"
 [codex]
 real_binary = "{real}"
 profiles_root = "{tmp_path / "profiles"}"
+
+[policy]
+allowed_project_roots = ["{tmp_path}"]
 """,
         encoding="utf-8",
     )

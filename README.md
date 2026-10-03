@@ -32,4 +32,6 @@ upstream branch is never a production dependency.
 The current code is an implementation milestone, not a production release. See
 [`docs/architecture.md`](docs/architecture.md) and
 [`docs/qualification.md`](docs/qualification.md) for trust boundaries and blocking
-release gates. `config/runtime.example.toml` contains paths only and no credentials.
+release gates. The versioned local contract is in
+[`docs/protocol.md`](docs/protocol.md). `config/runtime.example.toml` contains paths
+only and no credentials.

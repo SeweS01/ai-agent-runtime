@@ -64,6 +64,7 @@ def test_two_phase_correlation(tmp_path: Path) -> None:
         topic_path,
         {"topics": {"42": {"cwd": str(cwd), "engine": "codex", "exec_mode": "tmux"}}},
     )
+    snapshot = read_topic_config(topic_path)
     binding = RuntimeBinding(
         binding_id="binding-1",
         agent_instance_id="agent-1",
@@ -72,6 +73,7 @@ def test_two_phase_correlation(tmp_path: Path) -> None:
         project_id="project-1",
         canonical_cwd=str(cwd),
         expected_tmux_session="cc-n1001-42",
+        config_digest=snapshot.digest,
     )
     identity = WrapperIdentity(
         pid=1,
@@ -85,7 +87,7 @@ def test_two_phase_correlation(tmp_path: Path) -> None:
         phase_a_correlate(
             identity=identity,
             bindings=(binding,),
-            topic_config=read_topic_config(topic_path),
+            topic_config=snapshot,
         )
         == binding
     )
@@ -125,6 +127,7 @@ def test_codex_subprocess_config_fails_closed(tmp_path: Path) -> None:
         topic_path,
         {"topics": {"42": {"cwd": str(cwd), "engine": "codex", "exec_mode": "subprocess"}}},
     )
+    snapshot = read_topic_config(topic_path)
     binding = RuntimeBinding(
         "binding-1",
         "agent-1",
@@ -133,12 +136,13 @@ def test_codex_subprocess_config_fails_closed(tmp_path: Path) -> None:
         "project-1",
         str(cwd),
         "cc-n1001-42",
+        config_digest=snapshot.digest,
     )
     identity = WrapperIdentity(1, 2, 1000, "cc-n1001-42", "%1", str(cwd))
     with pytest.raises(RuntimeFailureError) as failure:
         phase_a_correlate(
             identity=identity,
             bindings=(binding,),
-            topic_config=read_topic_config(topic_path),
+            topic_config=snapshot,
         )
     assert failure.value.code is ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS

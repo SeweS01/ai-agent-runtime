@@ -8,7 +8,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from ai_agent_runtime.domain import DesiredSpec, RuntimeBinding
+from ai_agent_runtime.domain import DesiredSpec, ManagementMode, RuntimeBinding
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS bindings (
     canonical_cwd TEXT NOT NULL,
     expected_tmux_session TEXT NOT NULL,
     configured INTEGER NOT NULL CHECK (configured IN (0, 1)),
+    config_digest TEXT,
+    management_mode TEXT NOT NULL DEFAULT 'MANAGED',
     UNIQUE (agent_instance_id, chat_id, thread_id),
     UNIQUE (agent_instance_id, expected_tmux_session)
 );
@@ -69,6 +71,12 @@ CREATE TABLE IF NOT EXISTS outbox (
     next_retry_at REAL NOT NULL,
     ack_state TEXT NOT NULL DEFAULT 'PENDING'
 );
+CREATE TABLE IF NOT EXISTS request_results (
+    request_id TEXT PRIMARY KEY,
+    request_digest TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
 
 
@@ -83,11 +91,25 @@ class RuntimeStore:
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.executescript(_SCHEMA)
+        self._ensure_column("bindings", "config_digest", "TEXT")
+        self._ensure_column(
+            "bindings",
+            "management_mode",
+            "TEXT NOT NULL DEFAULT 'MANAGED'",
+        )
         self._connection.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '1')"
         )
         self._connection.commit()
         os.chmod(path, 0o600)
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        columns = {
+            str(row["name"])
+            for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def close(self) -> None:
         self._connection.close()
@@ -98,8 +120,9 @@ class RuntimeStore:
                 """
                 INSERT INTO bindings(
                     binding_id, agent_instance_id, chat_id, thread_id, project_id,
-                    canonical_cwd, expected_tmux_session, configured
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    canonical_cwd, expected_tmux_session, configured,
+                    config_digest, management_mode
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(binding_id) DO UPDATE SET
                     agent_instance_id=excluded.agent_instance_id,
                     chat_id=excluded.chat_id,
@@ -107,7 +130,9 @@ class RuntimeStore:
                     project_id=excluded.project_id,
                     canonical_cwd=excluded.canonical_cwd,
                     expected_tmux_session=excluded.expected_tmux_session,
-                    configured=excluded.configured
+                    configured=excluded.configured,
+                    config_digest=excluded.config_digest,
+                    management_mode=excluded.management_mode
                 """,
                 (
                     binding.binding_id,
@@ -118,6 +143,8 @@ class RuntimeStore:
                     binding.canonical_cwd,
                     binding.expected_tmux_session,
                     int(binding.configured),
+                    binding.config_digest,
+                    binding.management_mode,
                 ),
             )
 
@@ -136,6 +163,8 @@ class RuntimeStore:
                 canonical_cwd=row["canonical_cwd"],
                 expected_tmux_session=row["expected_tmux_session"],
                 configured=bool(row["configured"]),
+                config_digest=row["config_digest"],
+                management_mode=ManagementMode(row["management_mode"]),
             )
             for row in rows
         )
@@ -156,7 +185,28 @@ class RuntimeStore:
             canonical_cwd=row["canonical_cwd"],
             expected_tmux_session=row["expected_tmux_session"],
             configured=bool(row["configured"]),
+            config_digest=row["config_digest"],
+            management_mode=ManagementMode(row["management_mode"]),
         )
+
+    def update_binding_observation(
+        self,
+        binding_id: str,
+        *,
+        config_digest: str,
+        management_mode: ManagementMode,
+    ) -> None:
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE bindings
+                SET config_digest=?, management_mode=?
+                WHERE binding_id=?
+                """,
+                (config_digest, management_mode, binding_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"unknown binding: {binding_id}")
 
     def put_effective_spec(
         self,
@@ -165,20 +215,7 @@ class RuntimeStore:
         codex_home: Path,
         profile_fingerprint: str,
     ) -> None:
-        if not spec.verify_digest():
-            raise ValueError("desired spec digest mismatch")
-        existing = self._connection.execute(
-            "SELECT generation_id, revision, spec_digest FROM effective_specs WHERE binding_id=?",
-            (spec.binding_id,),
-        ).fetchone()
-        if existing is not None and existing["generation_id"] == spec.generation_id:
-            if spec.revision < existing["revision"]:
-                raise ValueError("revision rollback within generation")
-            if (
-                spec.revision == existing["revision"]
-                and spec.spec_digest != existing["spec_digest"]
-            ):
-                raise ValueError("same revision has a different digest")
+        self.validate_effective_spec_update(spec)
         payload = json.dumps(
             {
                 "binding_id": spec.binding_id,
@@ -223,6 +260,24 @@ class RuntimeStore:
                     time.time(),
                 ),
             )
+
+    def validate_effective_spec_update(self, spec: DesiredSpec) -> None:
+        if not spec.verify_digest():
+            raise ValueError("desired spec digest mismatch")
+        existing = self._connection.execute(
+            "SELECT generation_id, revision, spec_digest FROM effective_specs WHERE binding_id=?",
+            (spec.binding_id,),
+        ).fetchone()
+        if existing is not None and existing["generation_id"] != spec.generation_id:
+            raise ValueError("new generation requires authoritative snapshot reconcile")
+        if existing is not None:
+            if spec.revision < existing["revision"]:
+                raise ValueError("revision rollback within generation")
+            if (
+                spec.revision == existing["revision"]
+                and spec.spec_digest != existing["spec_digest"]
+            ):
+                raise ValueError("same revision has a different digest")
 
     def get_effective_spec(self, binding_id: str) -> tuple[DesiredSpec, Path, str] | None:
         row = self._connection.execute(
@@ -339,3 +394,35 @@ class RuntimeStore:
                 "SELECT count(*) FROM outbox WHERE ack_state='PENDING'"
             ).fetchone()[0],
         }
+
+    def get_request_result(self, request_id: str, request_digest: str) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT request_digest, response_json FROM request_results WHERE request_id=?",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["request_digest"] != request_digest:
+            raise ValueError("request_id replayed with different payload")
+        decoded = json.loads(row["response_json"])
+        if not isinstance(decoded, dict):
+            raise ValueError("persisted request result is invalid")
+        return decoded
+
+    def put_request_result(
+        self,
+        request_id: str,
+        request_digest: str,
+        response: dict[str, object],
+    ) -> None:
+        encoded = json.dumps(response, sort_keys=True, separators=(",", ":"))
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO request_results(
+                    request_id, request_digest, response_json, created_at
+                ) VALUES(?, ?, ?, ?)
+                ON CONFLICT(request_id) DO NOTHING
+                """,
+                (request_id, request_digest, encoded, time.time()),
+            )

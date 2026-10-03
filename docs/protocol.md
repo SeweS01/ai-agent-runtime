@@ -1,0 +1,40 @@
+# Local Runtime protocol v1
+
+Transport is a same-user Unix stream socket with length-delimited JSON frames. Each
+request carries `protocol_major`, `protocol_minor`, `action`, and a globally unique
+`request_id`. Runtime verifies `SO_PEERCRED`; wrapper registration additionally
+requires its claimed PID and UID to match the socket peer.
+
+Successful mutating responses are stored durably with a digest of the request. A
+retry using the same ID and payload returns the original outcome, including after a
+daemon restart. Reusing an ID with a different payload is rejected.
+
+## Wrapper actions
+
+- `register`: Phase A launch authorization. Inputs include AgentInstance, wrapper
+  PID/starttime/UID, cwd, tmux session/pane, and optional resume session ID.
+- `verify_started`: Phase B verification after the real child starts. Inputs add
+  instance/binding IDs and child PID/starttime.
+
+Unknown binding, unverified resume provenance, config drift, ambiguous identity, and
+Codex subprocess mode fail closed.
+
+## Control-plane action
+
+`apply_binding` accepts a binding identity and complete DesiredSpec. Before touching
+Telegram Agent configuration, Runtime verifies:
+
+- exact AgentInstance and forum chat;
+- canonical cwd containment in the configured project roots;
+- immutable binding/topic identity and no implicit project relocation;
+- provider/account profile safety;
+- canonical DesiredSpec digest;
+- monotonic revision within the existing generation.
+
+The upstream-created topic key must already exist. Runtime then performs a fresh-read
+allowlisted patch, atomic replace, backup, and post-write verification before storing
+the local effective spec. A different generation is rejected from this incremental
+action and requires the future authoritative snapshot-reconcile action.
+
+This protocol is local execution control, not a public CUS backend API. The CUS
+backend remains provider-neutral and talks through its Runtime connector.

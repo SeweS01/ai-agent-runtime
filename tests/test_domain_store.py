@@ -64,6 +64,12 @@ def test_store_rejects_revision_rollback_and_conflicting_digest(tmp_path: Path) 
             codex_home=tmp_path,
             profile_fingerprint="fp",
         )
+    with pytest.raises(ValueError, match="authoritative snapshot"):
+        store.put_effective_spec(
+            _spec(1, generation="gen-2"),
+            codex_home=tmp_path,
+            profile_fingerprint="fp",
+        )
 
 
 def test_session_provenance_is_immutable(tmp_path: Path) -> None:

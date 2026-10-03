@@ -34,6 +34,7 @@ class RuntimeConfig:
     tmux_state_path: Path
     upstream_sha: str
     tmux_session_prefix: str = "cc-"
+    allowed_project_roots: tuple[Path, ...] = ()
 
     @classmethod
     def defaults(cls) -> RuntimeConfig:
@@ -53,6 +54,7 @@ class RuntimeConfig:
             / "tmux_sessions"
             / "state.json",
             upstream_sha="",
+            allowed_project_roots=(),
         )
 
     @classmethod
@@ -62,7 +64,11 @@ class RuntimeConfig:
         runtime = _table(raw, "runtime")
         telegram = _table(raw, "telegram_agent")
         codex = _table(raw, "codex")
+        policy = _table(raw, "policy")
         state_dir = Path(runtime.get("state_dir", defaults.state_dir)).expanduser()
+        raw_roots = policy.get("allowed_project_roots", [])
+        if not isinstance(raw_roots, list) or not all(isinstance(item, str) for item in raw_roots):
+            raise ValueError("policy.allowed_project_roots must be a list of paths")
         return cls(
             agent_instance_id=str(runtime.get("agent_instance_id", "")),
             forum_chat_id=int(runtime.get("forum_chat_id", 0)),
@@ -77,6 +83,7 @@ class RuntimeConfig:
             tmux_state_path=Path(telegram.get("tmux_state", defaults.tmux_state_path)).expanduser(),
             upstream_sha=str(telegram.get("upstream_sha", "")),
             tmux_session_prefix=str(telegram.get("tmux_session_prefix", "cc-")),
+            allowed_project_roots=tuple(Path(item).expanduser() for item in raw_roots),
         )
 
     def validate(self) -> None:
@@ -96,6 +103,10 @@ class RuntimeConfig:
         }.items():
             if not value.is_absolute():
                 raise ValueError(f"{name} must be absolute")
+        if not self.allowed_project_roots:
+            raise ValueError("policy.allowed_project_roots must not be empty")
+        if any(not root.is_absolute() for root in self.allowed_project_roots):
+            raise ValueError("every allowed project root must be absolute")
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:
