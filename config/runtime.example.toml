@@ -2,7 +2,7 @@
 agent_instance_id = "ta_staging_01"
 forum_chat_id = -1001234567890
 state_dir = "/home/devops/.local/state/ai-agent-runtime/ta_staging_01"
-socket = "/run/user/1000/ai-agent-runtime/runtime.sock"
+socket = "/run/user/1000/ai-agent-runtime/ta_staging_01/runtime.sock"
 database = "/home/devops/.local/state/ai-agent-runtime/ta_staging_01/runtime.sqlite"
 
 [telegram_agent]

@@ -8,7 +8,13 @@ import sqlite3
 import time
 from pathlib import Path
 
-from ai_agent_runtime.domain import DesiredSpec, ManagementMode, RuntimeBinding
+from ai_agent_runtime.domain import (
+    DesiredSpec,
+    ManagementMode,
+    ObservedSpecProposal,
+    RuntimeBinding,
+    sha256_digest,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -394,6 +400,106 @@ class RuntimeStore:
                 "SELECT count(*) FROM outbox WHERE ack_state='PENDING'"
             ).fetchone()[0],
         }
+
+    def enqueue_observed_proposal(self, proposal: ObservedSpecProposal) -> str:
+        self.enqueue_outbox(
+            event_id=proposal.event_id,
+            kind="OBSERVED_SPEC_PROPOSAL",
+            binding_id=proposal.binding_id,
+            payload=proposal.payload(),
+        )
+        return proposal.event_id
+
+    def enqueue_outbox(
+        self,
+        *,
+        event_id: str,
+        kind: str,
+        binding_id: str,
+        payload: dict[str, object],
+    ) -> None:
+        payload_digest = sha256_digest(payload)
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        existing = self._connection.execute(
+            "SELECT payload_digest FROM outbox WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        if existing is not None and existing["payload_digest"] != payload_digest:
+            raise ValueError("outbox event_id reused with different payload")
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO outbox(
+                    event_id, kind, binding_id, payload_json, payload_digest,
+                    attempts, next_retry_at, ack_state
+                ) VALUES(?, ?, ?, ?, ?, 0, 0, 'PENDING')
+                ON CONFLICT(event_id) DO NOTHING
+                """,
+                (event_id, kind, binding_id, encoded, payload_digest),
+            )
+
+    def claim_outbox(
+        self,
+        *,
+        limit: int = 50,
+        now: float | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        if limit < 1 or limit > 100:
+            raise ValueError("outbox claim limit must be between 1 and 100")
+        current = time.time() if now is None else now
+        with self._connection:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM outbox
+                WHERE ack_state='PENDING' AND next_retry_at <= ?
+                ORDER BY next_retry_at, event_id
+                LIMIT ?
+                """,
+                (current, limit),
+            ).fetchall()
+            events: list[dict[str, object]] = []
+            for row in rows:
+                attempt = int(row["attempts"]) + 1
+                retry_delay = min(2 ** min(attempt, 8), 300)
+                self._connection.execute(
+                    """
+                    UPDATE outbox
+                    SET attempts=?, next_retry_at=?
+                    WHERE event_id=? AND ack_state='PENDING'
+                    """,
+                    (attempt, current + retry_delay, row["event_id"]),
+                )
+                payload = json.loads(row["payload_json"])
+                events.append(
+                    {
+                        "event_id": row["event_id"],
+                        "kind": row["kind"],
+                        "binding_id": row["binding_id"],
+                        "payload": payload,
+                        "payload_digest": row["payload_digest"],
+                        "attempt": attempt,
+                    }
+                )
+        return tuple(events)
+
+    def acknowledge_outbox(self, event_id: str, ack_state: str) -> None:
+        allowed = {"ACKED", "STALE_OBSERVED", "POLICY_REJECTED"}
+        if ack_state not in allowed:
+            raise ValueError("invalid outbox acknowledgement state")
+        row = self._connection.execute(
+            "SELECT ack_state FROM outbox WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown outbox event: {event_id}")
+        current = str(row["ack_state"])
+        if current != "PENDING" and current != ack_state:
+            raise ValueError("outbox event already has a different final acknowledgement")
+        with self._connection:
+            self._connection.execute(
+                "UPDATE outbox SET ack_state=? WHERE event_id=?",
+                (ack_state, event_id),
+            )
 
     def get_request_result(self, request_id: str, request_digest: str) -> dict[str, object] | None:
         row = self._connection.execute(

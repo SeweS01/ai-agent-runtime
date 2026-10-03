@@ -38,3 +38,11 @@ action and requires the future authoritative snapshot-reconcile action.
 
 This protocol is local execution control, not a public CUS backend API. The CUS
 backend remains provider-neutral and talks through its Runtime connector.
+
+## Durable outbox
+
+`outbox_pull` claims up to 100 due events and advances a bounded exponential retry
+lease. `outbox_ack` finalizes an event as `ACKED`, `STALE_OBSERVED`, or
+`POLICY_REJECTED`; replaying the same ACK is idempotent, while changing a final ACK
+is rejected. Observed proposals carry their base generation/revision/digest so CUS
+can reject delayed state rather than overwrite a newer user choice.

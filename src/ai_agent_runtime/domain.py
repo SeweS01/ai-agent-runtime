@@ -181,3 +181,47 @@ class LaunchSpec:
     model: str
     reasoning_effort: str
     real_codex: str
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedSpecProposal:
+    binding_id: str
+    base_generation_id: str
+    base_revision: int
+    base_spec_digest: str
+    model: str
+    reasoning_effort: str
+    instance_id: str
+    observation_sequence: int
+    evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if self.base_revision < 0 or self.observation_sequence < 0:
+            raise ValueError("proposal revisions and sequence must be non-negative")
+        if not self.base_spec_digest.startswith("sha256:"):
+            raise ValueError("base spec digest must be sha256-prefixed")
+        if not self.evidence_digest.startswith("sha256:"):
+            raise ValueError("evidence digest must be sha256-prefixed")
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "binding_id": self.binding_id,
+            "base_generation_id": self.base_generation_id,
+            "base_revision": self.base_revision,
+            "base_spec_digest": self.base_spec_digest,
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "instance_id": self.instance_id,
+            "observation_sequence": self.observation_sequence,
+            "evidence_digest": self.evidence_digest,
+        }
+
+    @property
+    def event_id(self) -> str:
+        identity = {
+            "binding_id": self.binding_id,
+            "instance_id": self.instance_id,
+            "observation_sequence": self.observation_sequence,
+            "evidence_digest": self.evidence_digest,
+        }
+        return f"observed:{sha256_digest(identity)[7:]}"

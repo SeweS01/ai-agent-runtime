@@ -110,6 +110,22 @@ class RuntimeServer:
                 response = self._ok(request_id, summary=self.store.summary())
             elif action == "apply_binding":
                 response = self._apply_binding(request_id, payload)
+            elif action == "outbox_pull":
+                limit = payload.get("limit", 50)
+                if not isinstance(limit, int):
+                    raise RuntimeFailureError(
+                        ErrorCode.INVALID_REQUEST, "outbox limit must be an integer"
+                    )
+                response = self._ok(
+                    request_id,
+                    events=self.store.claim_outbox(limit=limit),
+                )
+            elif action == "outbox_ack":
+                self.store.acknowledge_outbox(
+                    _required_str(payload, "event_id"),
+                    _required_str(payload, "ack_state"),
+                )
+                response = self._ok(request_id, acknowledged=True)
             else:
                 raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, f"unknown action: {action}")
             self._cache(request_id, request_digest, response)

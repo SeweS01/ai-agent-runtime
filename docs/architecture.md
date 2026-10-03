@@ -43,9 +43,9 @@ development/operator convenience, not the production namespace mechanism.
 ## Current implementation milestone
 
 The executable launch skeleton, durable/idempotent local protocol, incremental
-binding/spec apply, SQLite state, fresh-read adapters, two-phase correlation,
-process-group supervision, and fail-closed policies are implemented and tested. CUS
-connector/outbox reconciliation, authoritative generation snapshots,
-provider-qualified BUSY/IDLE evidence, rollout evidence, retirement, and real
-pinned-upstream qualification remain gated work. This milestone is not a production
-release.
+binding/spec apply, durable retrying outbox, SQLite state, fresh-read adapters,
+two-phase correlation, process-group supervision, and fail-closed policies are
+implemented and tested. CUS application-side connector, authoritative generation
+snapshots, provider-qualified BUSY/IDLE evidence, rollout evidence, retirement, and
+real Telegram/Codex E2E qualification remain gated work. This milestone is not a
+production release.

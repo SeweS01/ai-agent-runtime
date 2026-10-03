@@ -34,4 +34,5 @@ The current code is an implementation milestone, not a production release. See
 [`docs/qualification.md`](docs/qualification.md) for trust boundaries and blocking
 release gates. The versioned local contract is in
 [`docs/protocol.md`](docs/protocol.md). `config/runtime.example.toml` contains paths
-only and no credentials.
+only and no credentials. [`docs/deployment.md`](docs/deployment.md) defines the
+multi-AgentInstance filesystem and systemd namespace layout.
