@@ -14,6 +14,14 @@ from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
+from ai_agent_runtime.migration.inventory import (
+    InventoryError,
+    build_inventory,
+    compare_inventories,
+    read_inventory,
+    write_inventory,
+    write_json_artifact,
+)
 from ai_agent_runtime.process_safety import validate_owned_executable
 from ai_agent_runtime.state.store import RuntimeStore
 from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
@@ -63,6 +71,40 @@ def _local_summary(config: RuntimeConfig) -> int:
     return 0
 
 
+def _inventory_export(
+    config: RuntimeConfig,
+    *,
+    output: str,
+    cus_control_store: str | None,
+    skip_live_tmux: bool,
+) -> int:
+    live_tmux = (
+        {"available": False, "reason": "operator_skipped", "panes": []}
+        if skip_live_tmux
+        else None
+    )
+    inventory = build_inventory(
+        config,
+        cus_control_store=Path(cus_control_store).expanduser() if cus_control_store else None,
+        live_tmux=live_tmux,
+    )
+    target = Path(output).expanduser()
+    write_inventory(target, inventory)
+    print(json.dumps({"output": str(target), "inventory_digest": inventory["inventory_digest"]}))
+    return 0
+
+
+def _inventory_compare(*, baseline: str, candidate: str, output: str | None) -> int:
+    report = compare_inventories(
+        read_inventory(Path(baseline).expanduser()),
+        read_inventory(Path(candidate).expanduser()),
+    )
+    if output:
+        write_json_artifact(Path(output).expanduser(), report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["accepted"] else 1
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -75,6 +117,16 @@ def main() -> None:
     commands.add_parser("status")
     commands.add_parser("local-summary")
     commands.add_parser("doctor")
+    inventory = commands.add_parser("inventory")
+    inventory_commands = inventory.add_subparsers(dest="inventory_command", required=True)
+    inventory_export = inventory_commands.add_parser("export")
+    inventory_export.add_argument("--output", required=True)
+    inventory_export.add_argument("--cus-control-store")
+    inventory_export.add_argument("--skip-live-tmux", action="store_true")
+    inventory_compare = inventory_commands.add_parser("compare")
+    inventory_compare.add_argument("--baseline", required=True)
+    inventory_compare.add_argument("--candidate", required=True)
+    inventory_compare.add_argument("--output")
     namespace = parser.parse_args()
     try:
         config = _load_config(namespace.config)
@@ -87,7 +139,25 @@ def main() -> None:
             raise SystemExit(_local_summary(config))
         if namespace.command == "doctor":
             raise SystemExit(_doctor(config))
-    except (OSError, ValueError) as exc:
+        if namespace.command == "inventory":
+            if namespace.inventory_command == "export":
+                raise SystemExit(
+                    _inventory_export(
+                        config,
+                        output=namespace.output,
+                        cus_control_store=namespace.cus_control_store,
+                        skip_live_tmux=namespace.skip_live_tmux,
+                    )
+                )
+            if namespace.inventory_command == "compare":
+                raise SystemExit(
+                    _inventory_compare(
+                        baseline=namespace.baseline,
+                        candidate=namespace.candidate,
+                        output=namespace.output,
+                    )
+                )
+    except (InventoryError, OSError, ValueError) as exc:
         print(f"ai-agent-runtime: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 

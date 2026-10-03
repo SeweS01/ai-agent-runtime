@@ -24,3 +24,33 @@ actual service is enabled, its exact paths, user ownership, forum-chat uniquenes
 upstream release tuple, staging evidence, and rollback manifest must be validated.
 The production Telegram Agent drop-in must retain `KillMode=process` so its restart
 does not recursively destroy qualified tmux/wrapper/Codex processes.
+
+# Migration M0 inventory
+
+Before switching `TELEGRAM_CODEX_BIN`, create a read-only baseline artifact for
+each AgentInstance. The command records topic routing, safe effective-profile
+metadata, upstream tmux state and non-content live pane identities; it never
+copies bot tokens, Codex credentials, prompts or transcript contents.
+
+```bash
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory export \
+  --cus-control-store /var/lib/cus/runtime-control-v1.json \
+  --output /var/lib/ai-agent-runtime/migration/pre-cutover.json
+```
+
+The destination is created atomically with mode `0600` and is never
+overwritten. Store it in the change record and apply the operator's detached
+signature outside the repository. After cutover, export a new artifact and
+compare the stable routing fields:
+
+```bash
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory compare \
+  --baseline /var/lib/ai-agent-runtime/migration/pre-cutover.json \
+  --candidate /var/lib/ai-agent-runtime/migration/post-cutover.json \
+  --output /var/lib/ai-agent-runtime/migration/acceptance.json
+```
+
+Exit status `1` blocks acceptance when a topic is lost, added, rebound, renamed,
+duplicated, malformed, or leaves orphan upstream tmux state. Multiple topics
+sharing one canonical cwd are preserved as separate source refs and reported
+explicitly; they are never merged automatically.

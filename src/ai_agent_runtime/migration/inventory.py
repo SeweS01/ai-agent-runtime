@@ -1,0 +1,548 @@
+"""Read-only M0 inventory for Telegram Agent to Runtime migration.
+
+The exported artifact deliberately contains only routing and effective-profile
+metadata. Telegram/Codex credentials, raw environment values, prompts and
+transcripts are never copied into the inventory.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import subprocess
+import tempfile
+from collections import defaultdict
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
+
+from ai_agent_runtime.config import RuntimeConfig
+from ai_agent_runtime.telegram_upstream.adapter import TelegramUpstreamAdapter
+from ai_agent_runtime.telegram_upstream.tmux_state import UpstreamTmuxState, read_tmux_states
+from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
+
+INVENTORY_SCHEMA = "ai-agent-runtime.migration-inventory.v1"
+COMPARISON_SCHEMA = "ai-agent-runtime.migration-comparison.v1"
+_MAX_JSON_BYTES = 16 * 1024 * 1024
+_TMUX_FORMAT = (
+    "#{session_name}\x1f#{window_id}\x1f#{pane_id}\x1f"
+    "#{pane_pid}\x1f#{pane_current_path}\x1f#{pane_dead}"
+)
+
+
+class InventoryError(ValueError):
+    """An inventory source or artifact is unsafe or malformed."""
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _digest(value: object) -> str:
+    return f"sha256:{hashlib.sha256(_canonical_json(value)).hexdigest()}"
+
+
+def _read_json_object(path: Path) -> tuple[dict[str, Any], str]:
+    if not path.exists():
+        raise InventoryError(f"inventory source does not exist: {path}")
+    if not path.is_file() or path.stat().st_size > _MAX_JSON_BYTES:
+        raise InventoryError(f"inventory source is not a bounded regular file: {path}")
+    raw = path.read_bytes()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise InventoryError(f"inventory source is not valid JSON: {path}") from exc
+    if not isinstance(parsed, dict):
+        raise InventoryError(f"inventory source must contain a JSON object: {path}")
+    return parsed, f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
+def _source_evidence(path: Path, *, optional: bool = False) -> dict[str, object]:
+    if not path.exists():
+        if optional:
+            return {"path": str(path), "present": False, "sha256": None}
+        raise InventoryError(f"required inventory source does not exist: {path}")
+    if not path.is_file() or path.stat().st_size > _MAX_JSON_BYTES:
+        raise InventoryError(f"inventory source is not a bounded regular file: {path}")
+    raw = path.read_bytes()
+    return {
+        "path": str(path),
+        "present": True,
+        "sha256": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+        "size": len(raw),
+    }
+
+
+def _assert_source_stable(
+    name: str,
+    before: dict[str, object],
+    after: dict[str, object],
+) -> None:
+    if before != after:
+        raise InventoryError(f"{name} changed while inventory was being collected")
+
+
+def _safe_cwd(raw: object) -> tuple[str | None, str | None, bool, list[str]]:
+    if raw is None:
+        return None, None, False, ["CWD_UNCONFIGURED"]
+    if not isinstance(raw, str) or not raw:
+        return None, None, False, ["CWD_INVALID"]
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        return raw, None, False, ["CWD_NOT_ABSOLUTE"]
+    canonical = str(path.resolve(strict=False))
+    exists = path.is_dir()
+    return raw, canonical, exists, [] if exists else ["CWD_MISSING"]
+
+
+def collect_live_tmux() -> dict[str, object]:
+    """Collect non-content tmux pane identity without reading pane text/commands."""
+
+    try:
+        result = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", _TMUX_FORMAT],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "reason": type(exc).__name__, "panes": []}
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "reason": f"tmux_exit_{result.returncode}",
+            "panes": [],
+        }
+    panes: list[dict[str, object]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) != 6:
+            continue
+        session, window_id, pane_id, pid_raw, cwd, dead_raw = parts
+        try:
+            pane_pid = int(pid_raw)
+            dead = bool(int(dead_raw))
+        except ValueError:
+            continue
+        panes.append(
+            {
+                "session_name": session,
+                "window_id": window_id,
+                "pane_id": pane_id,
+                "pane_pid": pane_pid,
+                "cwd": cwd,
+                "dead": dead,
+            }
+        )
+    panes.sort(key=lambda pane: (str(pane["session_name"]), str(pane["pane_id"])))
+    return {"available": True, "reason": None, "panes": panes}
+
+
+def _load_cus_bindings(
+    path: Path | None,
+    *,
+    agent_instance_id: str,
+) -> tuple[dict[tuple[int, int], list[dict[str, object]]], dict[str, object]]:
+    if path is None:
+        return {}, {"configured": False, "present": False}
+    raw, sha256 = _read_json_object(path)
+    bindings = raw.get("bindings")
+    if not isinstance(bindings, dict):
+        raise InventoryError("CUS control store does not contain object-valued bindings")
+    indexed: dict[tuple[int, int], list[dict[str, object]]] = defaultdict(list)
+    for binding_id, value in bindings.items():
+        if not isinstance(binding_id, str) or not isinstance(value, dict):
+            continue
+        if value.get("agent_instance_id") != agent_instance_id:
+            continue
+        chat_id = value.get("chat_id")
+        thread_id = value.get("thread_id")
+        desired = value.get("desired")
+        if not isinstance(chat_id, int) or not isinstance(thread_id, int):
+            continue
+        safe: dict[str, object] = {
+            "binding_id": binding_id,
+            "project_id": value.get("project_id"),
+            "canonical_cwd": value.get("canonical_cwd"),
+            "lifecycle_status": value.get("lifecycle_status"),
+        }
+        if isinstance(desired, dict):
+            safe["desired"] = {
+                "generation_id": desired.get("generation_id"),
+                "revision": desired.get("revision"),
+                "spec_digest": desired.get("spec_digest"),
+                "provider": desired.get("provider"),
+                "account_profile": desired.get("account_profile"),
+                "model": desired.get("model"),
+                "reasoning_effort": desired.get("reasoning_effort"),
+            }
+        indexed[(chat_id, thread_id)].append(safe)
+    return indexed, {
+        "configured": True,
+        "path": str(path),
+        "present": True,
+        "sha256": sha256,
+        "store_revision": raw.get("store_revision"),
+    }
+
+
+def _load_runtime_bindings(
+    path: Path,
+    *,
+    agent_instance_id: str,
+) -> tuple[dict[tuple[int, int], list[dict[str, object]]], dict[str, object]]:
+    if not path.exists():
+        return {}, {"path": str(path), "present": False, "sha256": None}
+    if not path.is_file():
+        raise InventoryError("Runtime database is not a regular file")
+    sha256 = f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+    uri = f"file:{path}?mode=ro"
+    indexed: dict[tuple[int, int], list[dict[str, object]]] = defaultdict(list)
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT b.binding_id, b.chat_id, b.thread_id, b.project_id,
+                   b.canonical_cwd, b.configured, b.management_mode,
+                   e.generation_id, e.revision, e.spec_digest, e.payload_json
+              FROM bindings b
+              LEFT JOIN effective_specs e ON e.binding_id = b.binding_id
+             WHERE b.agent_instance_id = ?
+             ORDER BY b.binding_id
+            """,
+            (agent_instance_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise InventoryError("Runtime database cannot be inventoried read-only") from exc
+    finally:
+        if "connection" in locals():
+            connection.close()
+    for row in rows:
+        effective: dict[str, object] | None = None
+        payload_json = row["payload_json"]
+        if isinstance(payload_json, str):
+            try:
+                payload = json.loads(payload_json)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                effective = {
+                    "generation_id": row["generation_id"],
+                    "revision": row["revision"],
+                    "spec_digest": row["spec_digest"],
+                    "provider": payload.get("provider"),
+                    "account_profile": payload.get("account_profile"),
+                    "model": payload.get("model"),
+                    "reasoning_effort": payload.get("reasoning_effort"),
+                }
+        indexed[(int(row["chat_id"]), int(row["thread_id"]))].append(
+            {
+                "binding_id": row["binding_id"],
+                "project_id": row["project_id"],
+                "canonical_cwd": row["canonical_cwd"],
+                "configured": bool(row["configured"]),
+                "management_mode": row["management_mode"],
+                "effective": effective,
+            }
+        )
+    return indexed, {
+        "path": str(path),
+        "present": True,
+        "sha256": sha256,
+        "safe_records_digest": _digest(indexed),
+    }
+
+
+def build_inventory(
+    config: RuntimeConfig,
+    *,
+    cus_control_store: Path | None = None,
+    live_tmux: dict[str, object] | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    """Build a secret-free, read-only inventory artifact for one AgentInstance."""
+
+    topic_evidence = _source_evidence(config.topic_config_path)
+    topic_snapshot = read_topic_config(config.topic_config_path)
+    topic_evidence_after = _source_evidence(config.topic_config_path)
+    _assert_source_stable("topic_config", topic_evidence, topic_evidence_after)
+    if topic_snapshot.digest != topic_evidence["sha256"]:
+        raise InventoryError("topic_config digest does not match parsed snapshot")
+    tmux_evidence = _source_evidence(config.tmux_state_path, optional=True)
+    tmux_states = read_tmux_states(config.tmux_state_path)
+    tmux_evidence_after = _source_evidence(config.tmux_state_path, optional=True)
+    _assert_source_stable("tmux state", tmux_evidence, tmux_evidence_after)
+    state_by_topic: dict[tuple[int, int], list[UpstreamTmuxState]] = defaultdict(list)
+    for state in tmux_states:
+        if state.thread_id is not None:
+            state_by_topic[(state.chat_id, state.thread_id)].append(state)
+    cus_by_topic, cus_evidence = _load_cus_bindings(
+        cus_control_store,
+        agent_instance_id=config.agent_instance_id,
+    )
+    runtime_by_topic, runtime_evidence = _load_runtime_bindings(
+        config.database_path,
+        agent_instance_id=config.agent_instance_id,
+    )
+    observed_tmux = live_tmux if live_tmux is not None else collect_live_tmux()
+    panes = observed_tmux.get("panes", [])
+    panes_by_session: dict[str, list[dict[str, object]]] = defaultdict(list)
+    if isinstance(panes, list):
+        for pane in panes:
+            if isinstance(pane, dict) and isinstance(pane.get("session_name"), str):
+                panes_by_session[str(pane["session_name"])].append(pane)
+
+    topics_raw = topic_snapshot.raw["topics"]
+    assert isinstance(topics_raw, dict)
+    adapter = TelegramUpstreamAdapter(
+        config.upstream_sha,
+        session_name_prefix=config.tmux_session_prefix,
+    )
+    topics: list[dict[str, object]] = []
+    invalid_topic_keys: list[str] = []
+    for raw_thread_id, raw_entry in topics_raw.items():
+        try:
+            thread_id = int(raw_thread_id)
+        except (TypeError, ValueError):
+            invalid_topic_keys.append(str(raw_thread_id))
+            continue
+        if thread_id <= 0 or not isinstance(raw_entry, dict):
+            invalid_topic_keys.append(str(raw_thread_id))
+            continue
+        raw_cwd, canonical, cwd_exists, issues = _safe_cwd(raw_entry.get("cwd"))
+        engine = str(raw_entry.get("engine", "claude"))
+        exec_mode = str(raw_entry.get("exec_mode", "subprocess"))
+        expected_session = adapter.expected_session_name(
+            chat_id=config.forum_chat_id,
+            thread_id=thread_id,
+        )
+        states = state_by_topic.get((config.forum_chat_id, thread_id), [])
+        if len(states) > 1:
+            issues.append("DUPLICATE_TMUX_STATE")
+        state_payloads: list[dict[str, object]] = []
+        for state in states:
+            state_issues: list[str] = []
+            state_canonical = str(Path(state.cwd).expanduser().resolve(strict=False))
+            if canonical is not None and state_canonical != canonical:
+                state_issues.append("STATE_CWD_MISMATCH")
+                issues.append("STATE_CWD_MISMATCH")
+            if state.session_name != expected_session:
+                state_issues.append("STATE_SESSION_MISMATCH")
+                issues.append("STATE_SESSION_MISMATCH")
+            if state.provider != engine:
+                state_issues.append("STATE_PROVIDER_MISMATCH")
+                issues.append("STATE_PROVIDER_MISMATCH")
+            state_payloads.append(
+                {
+                    "session_name": state.session_name,
+                    "cwd": state.cwd,
+                    "canonical_cwd": state_canonical,
+                    "provider": state.provider,
+                    "session_id": state.session_id,
+                    "transcript_path": state.transcript_path,
+                    "issues": sorted(set(state_issues)),
+                }
+            )
+        cus_records = cus_by_topic.get((config.forum_chat_id, thread_id), [])
+        runtime_records = runtime_by_topic.get((config.forum_chat_id, thread_id), [])
+        if len(cus_records) > 1:
+            issues.append("DUPLICATE_CUS_BINDING")
+        if len(runtime_records) > 1:
+            issues.append("DUPLICATE_RUNTIME_BINDING")
+        for record in [*cus_records, *runtime_records]:
+            record_cwd = record.get("canonical_cwd")
+            if canonical is not None and isinstance(record_cwd, str) and record_cwd != canonical:
+                issues.append("BINDING_CWD_MISMATCH")
+        topics.append(
+            {
+                "source_ref": (
+                    f"{config.agent_instance_id}/{config.forum_chat_id}/{thread_id}"
+                ),
+                "agent_instance_id": config.agent_instance_id,
+                "chat_id": config.forum_chat_id,
+                "thread_id": thread_id,
+                "name": str(raw_entry.get("name", "")),
+                "type": str(raw_entry.get("type", "assistant")),
+                "mode": str(raw_entry.get("mode", "free")),
+                "cwd": raw_cwd,
+                "canonical_cwd": canonical,
+                "cwd_exists": cwd_exists,
+                "engine": engine,
+                "exec_mode": exec_mode,
+                "model_override": raw_entry.get("model"),
+                "expected_tmux_session": expected_session,
+                "tmux_state": state_payloads,
+                "live_tmux_panes": panes_by_session.get(expected_session, []),
+                "cus_bindings": cus_records,
+                "runtime_bindings": runtime_records,
+                "issues": sorted(set(issues)),
+            }
+        )
+    topics.sort(key=lambda item: cast(int, item["thread_id"]))
+
+    cwd_groups: dict[str, list[str]] = defaultdict(list)
+    for topic in topics:
+        grouped_canonical = topic.get("canonical_cwd")
+        if isinstance(grouped_canonical, str):
+            cwd_groups[grouped_canonical].append(str(topic["source_ref"]))
+    shared_cwds = [
+        {"canonical_cwd": cwd, "source_refs": sorted(refs)}
+        for cwd, refs in sorted(cwd_groups.items())
+        if len(refs) > 1
+    ]
+    known_topics = {
+        (config.forum_chat_id, cast(int, topic["thread_id"])) for topic in topics
+    }
+    orphan_states = [
+        {
+            "chat_id": state.chat_id,
+            "thread_id": state.thread_id,
+            "session_name": state.session_name,
+            "cwd": state.cwd,
+            "provider": state.provider,
+        }
+        for state in tmux_states
+        if state.thread_id is None or (state.chat_id, state.thread_id) not in known_topics
+    ]
+    timestamp = generated_at or datetime.now(tz=UTC)
+    body: dict[str, object] = {
+        "schema": INVENTORY_SCHEMA,
+        "generated_at": timestamp.isoformat().replace("+00:00", "Z"),
+        "agent_instance": {
+            "agent_instance_id": config.agent_instance_id,
+            "forum_chat_id": config.forum_chat_id,
+            "pinned_upstream_sha": config.upstream_sha,
+            "tmux_session_prefix": config.tmux_session_prefix,
+        },
+        "sources": {
+            "topic_config": topic_evidence,
+            "tmux_state": tmux_evidence,
+            "runtime_database": runtime_evidence,
+            "cus_control_store": cus_evidence,
+        },
+        "topics": topics,
+        "shared_canonical_cwds": shared_cwds,
+        "invalid_topic_keys": sorted(invalid_topic_keys),
+        "orphan_tmux_states": orphan_states,
+        "live_tmux": observed_tmux,
+    }
+    body["inventory_digest"] = _digest(body)
+    return body
+
+
+def write_inventory(path: Path, inventory: dict[str, object]) -> None:
+    """Create an immutable-by-default 0600 inventory artifact atomically."""
+
+    if path.exists() or path.is_symlink():
+        raise InventoryError(f"refusing to overwrite inventory artifact: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    encoded = json.dumps(inventory, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(tmp, path)
+        parent_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def read_inventory(path: Path) -> dict[str, object]:
+    payload, _sha256 = _read_json_object(path)
+    if payload.get("schema") != INVENTORY_SCHEMA:
+        raise InventoryError("unsupported inventory schema")
+    supplied = payload.get("inventory_digest")
+    if not isinstance(supplied, str):
+        raise InventoryError("inventory digest is missing")
+    unsigned = dict(payload)
+    unsigned.pop("inventory_digest", None)
+    if supplied != _digest(unsigned):
+        raise InventoryError("inventory digest verification failed")
+    return payload
+
+
+def _topic_index(inventory: dict[str, object]) -> tuple[dict[str, dict[str, object]], list[str]]:
+    raw_topics = inventory.get("topics")
+    if not isinstance(raw_topics, list):
+        raise InventoryError("inventory topics must be a list")
+    indexed: dict[str, dict[str, object]] = {}
+    duplicates: list[str] = []
+    for raw in raw_topics:
+        if not isinstance(raw, dict) or not isinstance(raw.get("source_ref"), str):
+            raise InventoryError("inventory contains a malformed topic")
+        source_ref = str(raw["source_ref"])
+        if source_ref in indexed:
+            duplicates.append(source_ref)
+        indexed[source_ref] = raw
+    return indexed, sorted(set(duplicates))
+
+
+def compare_inventories(
+    baseline: dict[str, object],
+    candidate: dict[str, object],
+) -> dict[str, object]:
+    """Compare stable topic routing fields for migration acceptance."""
+
+    base_topics, base_duplicates = _topic_index(baseline)
+    candidate_topics, candidate_duplicates = _topic_index(candidate)
+    missing = sorted(set(base_topics) - set(candidate_topics))
+    added = sorted(set(candidate_topics) - set(base_topics))
+    field_changes: list[dict[str, object]] = []
+    compared_fields = ("name", "canonical_cwd", "engine", "exec_mode")
+    for source_ref in sorted(set(base_topics) & set(candidate_topics)):
+        changes = {
+            field: {
+                "before": base_topics[source_ref].get(field),
+                "after": candidate_topics[source_ref].get(field),
+            }
+            for field in compared_fields
+            if base_topics[source_ref].get(field) != candidate_topics[source_ref].get(field)
+        }
+        if changes:
+            field_changes.append({"source_ref": source_ref, "changes": changes})
+    blocking = bool(
+        missing
+        or added
+        or field_changes
+        or base_duplicates
+        or candidate_duplicates
+        or candidate.get("invalid_topic_keys")
+        or candidate.get("orphan_tmux_states")
+    )
+    report: dict[str, object] = {
+        "schema": COMPARISON_SCHEMA,
+        "baseline_digest": baseline.get("inventory_digest"),
+        "candidate_digest": candidate.get("inventory_digest"),
+        "accepted": not blocking,
+        "missing_source_refs": missing,
+        "unexpected_source_refs": added,
+        "field_changes": field_changes,
+        "baseline_duplicate_source_refs": base_duplicates,
+        "candidate_duplicate_source_refs": candidate_duplicates,
+        "candidate_invalid_topic_keys": candidate.get("invalid_topic_keys", []),
+        "candidate_orphan_tmux_states": candidate.get("orphan_tmux_states", []),
+    }
+    report["comparison_digest"] = _digest(report)
+    return report
+
+
+def write_json_artifact(path: Path, payload: dict[str, object]) -> None:
+    write_inventory(path, payload)
