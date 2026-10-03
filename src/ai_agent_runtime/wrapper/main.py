@@ -91,6 +91,16 @@ def _call_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> dict[str, A
     return response
 
 
+def _notify_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> None:
+    """Best-effort terminal notification; child exit status remains authoritative."""
+
+    async def notify() -> None:
+        await asyncio.wait_for(request(config.socket_path, payload), timeout=2.0)
+
+    with contextlib.suppress(TimeoutError, OSError, EOFError, ValueError):
+        asyncio.run(notify())
+
+
 def _fail(code: str, detail: str) -> NoReturn:
     print(f"codex-wrapper: {code}: {detail}", file=sys.stderr)
     raise SystemExit(_EXIT_BY_CODE.get(code, 78))
@@ -137,6 +147,7 @@ def _run_supervised(
         stderr=None,
         preexec_fn=_child_setup,
     )
+    child_starttime = proc_starttime(child.pid)
     terminate_requested = False
 
     def handle_termination(_signum: int, _frame: object) -> None:
@@ -156,7 +167,7 @@ def _run_supervised(
             instance_id=registration["instance_id"],
             binding_id=registration["binding_id"],
             child_pid=child.pid,
-            child_starttime=proc_starttime(child.pid),
+            child_starttime=child_starttime,
             **_identity_payload(
                 pane=str(registration["tmux_pane"]),
                 session=str(registration["tmux_session"]),
@@ -177,6 +188,24 @@ def _run_supervised(
             time.sleep(0.1)
         return int(child.returncode or 0)
     finally:
+        if child.poll() is not None:
+            _notify_runtime(
+                config,
+                versioned(
+                    "child_exited",
+                    str(uuid.uuid4()),
+                    agent_instance_id=config.agent_instance_id,
+                    instance_id=registration["instance_id"],
+                    binding_id=registration["binding_id"],
+                    child_pid=child.pid,
+                    child_starttime=child_starttime,
+                    exit_code=int(child.returncode or 0),
+                    **_identity_payload(
+                        pane=str(registration["tmux_pane"]),
+                        session=str(registration["tmux_session"]),
+                    ),
+                ),
+            )
         signal.signal(signal.SIGTERM, old_term)
         signal.signal(signal.SIGINT, old_int)
 

@@ -139,8 +139,13 @@ class RuntimeServer:
                 response = self._register(request_id, payload, peer_pid, peer_uid)
             elif action == "verify_started":
                 response = await self._verify_started(request_id, payload, peer_pid, peer_uid)
+            elif action == "child_exited":
+                response = self._child_exited(request_id, payload, peer_pid, peer_uid)
             elif action == "status":
-                response = self._ok(request_id, summary=self.store.summary())
+                response = self._ok(
+                    request_id,
+                    status=self.store.status_report(self.config.agent_instance_id),
+                )
             elif action == "apply_binding":
                 response = self._apply_binding(request_id, payload)
             elif action == "apply_snapshot":
@@ -772,6 +777,43 @@ class RuntimeServer:
             session_id=state.session_id,
             expected_spec_digest=spec.spec_digest,
         )
+
+    def _child_exited(
+        self,
+        request_id: str,
+        payload: dict[str, Any],
+        peer_pid: int,
+        peer_uid: int,
+    ) -> dict[str, Any]:
+        identity = _identity(payload)
+        _verify_claimed_peer(identity, peer_pid=peer_pid, peer_uid=peer_uid)
+        self.identity_verifier(identity)
+        instance_id = _required_str(payload, "instance_id")
+        binding_id = _required_str(payload, "binding_id")
+        child_pid = _required_int(payload, "child_pid")
+        child_starttime = _required_int(payload, "child_starttime")
+        exit_code = _required_int(payload, "exit_code")
+        registered = self.store.get_registered_instance(instance_id)
+        if registered is None or (
+            registered.binding_id != binding_id
+            or registered.wrapper_pid != identity.pid
+            or registered.wrapper_starttime != identity.starttime
+            or registered.tmux_session != identity.tmux_session
+            or registered.tmux_pane != identity.tmux_pane
+        ):
+            raise RuntimeFailureError(
+                ErrorCode.CORRELATION_MISMATCH,
+                "exited child does not match registered wrapper instance",
+            )
+        self.store.mark_instance_exited(
+            instance_id=instance_id,
+            binding_id=binding_id,
+            wrapper_pid=identity.pid,
+            wrapper_starttime=identity.starttime,
+            child_pid=child_pid,
+            child_starttime=child_starttime,
+        )
+        return self._ok(request_id, instance_id=instance_id, exit_code=exit_code)
 
     async def _reconcile_topic_config_loop(self) -> None:
         while True:

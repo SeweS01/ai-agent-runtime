@@ -19,6 +19,7 @@ class LifecycleState(StrEnum):
     PENDING_CHANGE = "PENDING_CHANGE"
     RETIRED_FOR_RESTART = "RETIRED_FOR_RESTART"
     START_FAILED = "START_FAILED"
+    EXITED = "EXITED"
 
 
 class ManagementMode(StrEnum):

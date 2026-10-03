@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from ai_agent_runtime.config import RuntimeConfig
+from ai_agent_runtime.wrapper import main as wrapper_main
 from ai_agent_runtime.wrapper.main import _config_path, run
 
 
@@ -92,3 +94,45 @@ allowed_project_roots = ["{tmp_path}"]
     assert run(["--version"]) == 0
     assert "codex-wrapper" in capsys.readouterr().out
     assert not marker.exists()
+
+
+def test_supervisor_reports_child_exit_without_changing_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeChild:
+        pid = 12345
+        returncode = 7
+
+        def poll(self) -> int:
+            return 7
+
+    monkeypatch.setattr(wrapper_main.subprocess, "Popen", lambda *_args, **_kwargs: FakeChild())
+    monkeypatch.setattr(wrapper_main, "proc_starttime", lambda _pid: 10)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        wrapper_main, "_call_runtime", lambda _config, payload: calls.append(payload)
+    )
+    monkeypatch.setattr(
+        wrapper_main, "_notify_runtime", lambda _config, payload: calls.append(payload)
+    )
+    config = RuntimeConfig.defaults()
+    registration = {
+        "instance_id": "instance-1",
+        "binding_id": "binding-1",
+        "tmux_pane": "%1",
+        "tmux_session": "cc-n1001-42",
+    }
+    monkeypatch.chdir(tmp_path)
+    assert (
+        wrapper_main._run_supervised(
+            "/bin/false",
+            [],
+            environment={},
+            registration=registration,
+            config=config,
+        )
+        == 7
+    )
+    assert [call["action"] for call in calls] == ["verify_started", "child_exited"]
+    assert calls[1]["exit_code"] == 7

@@ -15,6 +15,9 @@ daemon restart. Reusing an ID with a different payload is rejected.
   PID/starttime/UID, cwd, tmux session/pane, and optional resume session ID.
 - `verify_started`: Phase B verification after the real child starts. Inputs add
   instance/binding IDs and child PID/starttime.
+- `child_exited`: terminal wrapper notification with the same composite process and
+  tmux identity plus exit code. A missing/mismatched instance is rejected; daemon
+  outage cannot change the already determined child exit code.
 
 Unknown binding, unverified resume provenance, config drift, ambiguous identity, and
 Codex subprocess mode fail closed.
@@ -46,6 +49,11 @@ effective spec, but preserves binding, instance, and session-provenance history.
 
 This protocol is local execution control, not a public CUS backend API. The CUS
 backend remains provider-neutral and talks through its Runtime connector.
+
+`status` returns sanitized binding source identity, project/cwd, management mode,
+desired profile/model/reasoning and revision, exact wrapper/child/tmux identities,
+verified applied revision, lifecycle, and derived health. It never returns credential
+content or transcript text.
 
 ## Durable outbox
 

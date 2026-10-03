@@ -589,6 +589,38 @@ class RuntimeStore:
             launch_spec=launch_spec,
         )
 
+    def mark_instance_exited(
+        self,
+        *,
+        instance_id: str,
+        binding_id: str,
+        wrapper_pid: int,
+        wrapper_starttime: int,
+        child_pid: int,
+        child_starttime: int,
+    ) -> None:
+        with self._connection:
+            updated = self._connection.execute(
+                """
+                UPDATE instances
+                SET lifecycle='EXITED', updated_at=?
+                WHERE instance_id=? AND binding_id=?
+                  AND wrapper_pid=? AND wrapper_starttime=?
+                  AND child_pid=? AND child_starttime=?
+                """,
+                (
+                    time.time(),
+                    instance_id,
+                    binding_id,
+                    wrapper_pid,
+                    wrapper_starttime,
+                    child_pid,
+                    child_starttime,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise KeyError("exited child does not match registered instance")
+
     def pending_evidence_instances(self) -> tuple[PendingEvidenceInstance, ...]:
         rows = self._connection.execute(
             """
@@ -874,6 +906,95 @@ class RuntimeStore:
             "outbox_pending": self._connection.execute(
                 "SELECT count(*) FROM outbox WHERE ack_state='PENDING'"
             ).fetchone()[0],
+        }
+
+    def status_report(self, agent_instance_id: str) -> dict[str, object]:
+        reports: list[dict[str, object]] = []
+        for binding in self.list_bindings(agent_instance_id):
+            effective = self.get_effective_spec(binding.binding_id)
+            desired: dict[str, object] | None = None
+            if effective is not None:
+                spec, _codex_home, profile = effective
+                desired = {
+                    "generation_id": spec.generation_id,
+                    "revision": spec.revision,
+                    "spec_digest": spec.spec_digest,
+                    "account_profile": spec.account_profile,
+                    "model": spec.model,
+                    "reasoning_effort": spec.reasoning_effort,
+                    "profile_fingerprint": profile,
+                }
+            rows = self._connection.execute(
+                """
+                SELECT i.*, a.generation_id AS applied_generation,
+                       a.revision AS applied_revision,
+                       a.spec_digest AS verified_applied_digest
+                FROM instances AS i
+                LEFT JOIN applied_specs AS a ON a.instance_id=i.instance_id
+                WHERE i.binding_id=?
+                ORDER BY i.updated_at DESC, i.instance_id
+                """,
+                (binding.binding_id,),
+            ).fetchall()
+            instances = [
+                {
+                    "instance_id": row["instance_id"],
+                    "lifecycle": row["lifecycle"],
+                    "tmux_session": row["tmux_session"],
+                    "tmux_pane": row["tmux_pane"],
+                    "wrapper_pid": row["wrapper_pid"],
+                    "wrapper_starttime": row["wrapper_starttime"],
+                    "child_pid": row["child_pid"],
+                    "child_starttime": row["child_starttime"],
+                    "applied": (
+                        {
+                            "generation_id": row["applied_generation"],
+                            "revision": row["applied_revision"],
+                            "spec_digest": row["verified_applied_digest"],
+                        }
+                        if row["verified_applied_digest"] is not None
+                        else None
+                    ),
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ]
+            active = [item for item in instances if item["lifecycle"] != "EXITED"]
+            if not binding.configured or desired is None:
+                health = "OUT_OF_SYNC"
+            elif binding.management_mode != ManagementMode.MANAGED:
+                health = binding.management_mode.value
+            elif any(item["applied"] is None for item in active):
+                health = "OUT_OF_SYNC"
+            elif any(
+                isinstance(item["applied"], dict)
+                and item["applied"]["spec_digest"] != desired["spec_digest"]
+                for item in active
+            ):
+                health = "PENDING_CHANGE"
+            else:
+                health = "RUNTIME_HEALTHY"
+            reports.append(
+                {
+                    "binding_id": binding.binding_id,
+                    "source_ref": {
+                        "agent_instance_id": binding.agent_instance_id,
+                        "chat_id": binding.chat_id,
+                        "thread_id": binding.thread_id,
+                    },
+                    "project_id": binding.project_id,
+                    "canonical_cwd": binding.canonical_cwd,
+                    "configured": binding.configured,
+                    "management_mode": binding.management_mode.value,
+                    "health": health,
+                    "desired": desired,
+                    "instances": instances,
+                }
+            )
+        return {
+            "agent_instance_id": agent_instance_id,
+            "bindings": reports,
+            "summary": self.summary(),
         }
 
     def enqueue_observed_proposal(self, proposal: ObservedSpecProposal) -> str:

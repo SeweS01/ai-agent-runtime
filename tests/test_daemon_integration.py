@@ -163,6 +163,28 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert evidence is not None
     assert evidence["rollout_inode"] == rollout.stat().st_ino
 
+    exited = await request(
+        config.socket_path,
+        versioned(
+            "child_exited",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid),
+            exit_code=0,
+            **identity,
+        ),
+    )
+    assert exited["ok"] is True
+    status = await request(
+        config.socket_path,
+        versioned("status", str(uuid.uuid4())),
+    )
+    instance_status = status["status"]["bindings"][0]["instances"][0]
+    assert instance_status["lifecycle"] == "EXITED"
+
     server_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await server_task
