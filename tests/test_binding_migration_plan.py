@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+from copy import deepcopy
+
+from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
+from ai_agent_runtime.migration.inventory import INVENTORY_SCHEMA
+
+
+def _topic(thread_id: int, *, binding_id: str, project_id: str) -> dict[str, object]:
+    cwd = "/srv/repos/shared"
+    return {
+        "source_ref": f"agent-1/-1001/{thread_id}",
+        "agent_instance_id": "agent-1",
+        "chat_id": -1001,
+        "thread_id": thread_id,
+        "canonical_cwd": cwd,
+        "engine": "codex",
+        "exec_mode": "tmux",
+        "issues": [],
+        "cus_bindings": [
+            {
+                "binding_id": binding_id,
+                "project_id": project_id,
+                "canonical_cwd": cwd,
+                "lifecycle_status": "CONFIGURED",
+                "desired": {
+                    "provider": "codex",
+                    "account_profile": f"account-{thread_id}",
+                    "model": "gpt-test",
+                    "reasoning_effort": "high",
+                },
+            }
+        ],
+    }
+
+
+def _inventory() -> dict[str, object]:
+    return {
+        "schema": INVENTORY_SCHEMA,
+        "inventory_digest": "sha256:" + "1" * 64,
+        "topics": [
+            _topic(42, binding_id="binding-42", project_id="project-shared"),
+            _topic(43, binding_id="binding-43", project_id="project-shared"),
+        ],
+    }
+
+
+def test_plan_keeps_same_cwd_topics_as_distinct_ready_bindings() -> None:
+    plan = build_binding_migration_plan(_inventory(), generation_id="migration-2026-10-03")
+    assert plan["accepted"] is True
+    assert plan["counts"] == {"READY": 2, "UNMANAGED": 0, "BLOCKED": 0}
+    entries = plan["entries"]
+    assert isinstance(entries, list)
+    assert [entry["binding_id"] for entry in entries] == ["binding-42", "binding-43"]
+    assert {entry["project_id"] for entry in entries} == {"project-shared"}
+    assert {entry["desired"]["account_profile"] for entry in entries} == {
+        "account-42",
+        "account-43",
+    }
+    assert all(entry["desired"]["generation_id"] == "migration-2026-10-03" for entry in entries)
+    assert all(entry["desired"]["revision"] == 1 for entry in entries)
+
+
+def test_plan_never_defaults_missing_desired_or_codex_subprocess() -> None:
+    inventory = _inventory()
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    topics[0]["cus_bindings"] = []
+    topics[1]["exec_mode"] = "subprocess"
+    plan = build_binding_migration_plan(inventory, generation_id="migration-1")
+    assert plan["accepted"] is False
+    entries = plan["entries"]
+    assert isinstance(entries, list)
+    assert all(entry["status"] == "BLOCKED" for entry in entries)
+    assert all(entry["desired"] is None for entry in entries)
+    assert "MISSING_OR_AMBIGUOUS_CUS_BINDING" in entries[0]["blockers"]
+    assert "UNSUPPORTED_CODEX_SUBPROCESS" in entries[1]["blockers"]
+
+
+def test_plan_blocks_duplicate_binding_and_project_identity_conflicts() -> None:
+    inventory = deepcopy(_inventory())
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    topics[1]["cus_bindings"][0]["binding_id"] = "binding-42"
+    topics[1]["cus_bindings"][0]["project_id"] = "other-project"
+    plan = build_binding_migration_plan(inventory, generation_id="migration-1")
+    assert plan["accepted"] is False
+    entries = plan["entries"]
+    assert isinstance(entries, list)
+    for entry in entries:
+        assert entry["status"] == "BLOCKED"
+        assert entry["desired"] is None
+        assert "DUPLICATE_BINDING_ID" in entry["blockers"]
+        assert "PROJECT_ID_CONFLICT_FOR_CANONICAL_CWD" in entry["blockers"]

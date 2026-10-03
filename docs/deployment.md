@@ -54,3 +54,19 @@ Exit status `1` blocks acceptance when a topic is lost, added, rebound, renamed,
 duplicated, malformed, or leaves orphan upstream tmux state. Multiple topics
 sharing one canonical cwd are preserved as separate source refs and reported
 explicitly; they are never merged automatically.
+
+Generate a non-mutating Runtime Binding plan only after the baseline artifact
+has been reviewed. A managed topic is marked `READY` only when one exact CUS
+binding supplies its account, model and reasoning; incomplete data remains
+`BLOCKED` and no default profile is invented. Non-Codex topics remain
+`UNMANAGED`.
+
+```bash
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory plan-bindings \
+  --inventory /var/lib/ai-agent-runtime/migration/pre-cutover.json \
+  --generation-id migration-2026-10-03 \
+  --output /var/lib/ai-agent-runtime/migration/binding-plan.json
+```
+
+The plan is evidence, not an apply command. It must be reconciled with CUS and
+the Runtime snapshot protocol in a later migration stage.

@@ -14,6 +14,7 @@ from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
+from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
 from ai_agent_runtime.migration.inventory import (
     InventoryError,
     build_inventory,
@@ -105,6 +106,27 @@ def _inventory_compare(*, baseline: str, candidate: str, output: str | None) -> 
     return 0 if report["accepted"] else 1
 
 
+def _inventory_plan_bindings(*, inventory: str, generation_id: str, output: str) -> int:
+    plan = build_binding_migration_plan(
+        read_inventory(Path(inventory).expanduser()),
+        generation_id=generation_id,
+    )
+    target = Path(output).expanduser()
+    write_json_artifact(target, plan)
+    print(
+        json.dumps(
+            {
+                "output": str(target),
+                "plan_digest": plan["plan_digest"],
+                "accepted": plan["accepted"],
+                "counts": plan["counts"],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if plan["accepted"] else 1
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -127,6 +149,10 @@ def main() -> None:
     inventory_compare.add_argument("--baseline", required=True)
     inventory_compare.add_argument("--candidate", required=True)
     inventory_compare.add_argument("--output")
+    inventory_plan = inventory_commands.add_parser("plan-bindings")
+    inventory_plan.add_argument("--inventory", required=True)
+    inventory_plan.add_argument("--generation-id", required=True)
+    inventory_plan.add_argument("--output", required=True)
     namespace = parser.parse_args()
     try:
         config = _load_config(namespace.config)
@@ -154,6 +180,14 @@ def main() -> None:
                     _inventory_compare(
                         baseline=namespace.baseline,
                         candidate=namespace.candidate,
+                        output=namespace.output,
+                    )
+                )
+            if namespace.inventory_command == "plan-bindings":
+                raise SystemExit(
+                    _inventory_plan_bindings(
+                        inventory=namespace.inventory,
+                        generation_id=namespace.generation_id,
                         output=namespace.output,
                     )
                 )
