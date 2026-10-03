@@ -1,0 +1,26 @@
+{
+  "report_id": "codex-0.156.1-rollout-contract-2026-10-03",
+  "status": "PARSER_BASELINE_ONLY",
+  "codex_version": "codex-cli 0.156.1",
+  "binary_sha256": "sha256:0b2e9301d6100dddda3b9d5c80ebaeaa3a2f1962388f2f36f6b96a9f08b1f33f",
+  "qualified_structured_records": {
+    "busy": "event_msg.payload.type=task_started with turn_id",
+    "settings": "turn_context.payload with turn_id, model, effort",
+    "idle": "event_msg.payload.type=task_complete with matching turn_id"
+  },
+  "explicitly_not_evidence": [
+    "Telegram command text",
+    "TUI screen contents",
+    "model picker open/close",
+    "response_item or message text",
+    "absence of output"
+  ],
+  "privacy_method": "Only record types, key names, model, effort and opaque turn identity were inspected; prompt and response content were not collected.",
+  "observed_max_jsonl_record_bytes": 1628416,
+  "parser_max_jsonl_record_bytes": 2097152,
+  "limitations": [
+    "This report qualifies the metadata parser contract only.",
+    "It is not TELEGRAM_E2E_VERIFIED and does not authorize production cutover.",
+    "The production release tuple still requires real Telegram/tmux/rollout and retirement-race qualification."
+  ]
+}

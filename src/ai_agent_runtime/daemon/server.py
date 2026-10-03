@@ -19,6 +19,9 @@ from ai_agent_runtime.domain import (
     DesiredSpec,
     LifecycleState,
     ManagementMode,
+    ObservedSpecProposal,
+    RolloutObservationCursor,
+    RolloutObservationTarget,
     RuntimeBinding,
     WrapperIdentity,
     sha256_digest,
@@ -33,6 +36,11 @@ from ai_agent_runtime.process_safety import (
     validate_project_path,
     verify_codex_child,
     verify_wrapper_identity,
+)
+from ai_agent_runtime.providers.codex.rollout import (
+    RolloutContractError,
+    RolloutSignalKind,
+    scan_rollout,
 )
 from ai_agent_runtime.state.store import RuntimeStore
 from ai_agent_runtime.systemd_notify import notify, watchdog_loop
@@ -76,6 +84,7 @@ class RuntimeServer:
         watchdog = asyncio.create_task(watchdog_loop())
         reconciler = asyncio.create_task(self._reconcile_topic_config_loop())
         evidence_collector = asyncio.create_task(self._collect_applied_evidence_loop())
+        rollout_observer = asyncio.create_task(self._observe_codex_rollouts_loop())
         notify("READY=1")
         try:
             async with server:
@@ -85,12 +94,15 @@ class RuntimeServer:
             watchdog.cancel()
             reconciler.cancel()
             evidence_collector.cancel()
+            rollout_observer.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watchdog
             with contextlib.suppress(asyncio.CancelledError):
                 await reconciler
             with contextlib.suppress(asyncio.CancelledError):
                 await evidence_collector
+            with contextlib.suppress(asyncio.CancelledError):
+                await rollout_observer
             self.config.socket_path.unlink(missing_ok=True)
             self.store.close()
 
@@ -868,6 +880,120 @@ class RuntimeServer:
             except (OSError, ValueError, RuntimeFailureError):
                 pass
             await asyncio.sleep(self.evidence_interval)
+
+    async def _observe_codex_rollouts_loop(self) -> None:
+        while True:
+            for target in self.store.rollout_observation_targets():
+                with contextlib.suppress(OSError, ValueError, RolloutContractError):
+                    self._observe_codex_rollout(target)
+            await asyncio.sleep(self.evidence_interval)
+
+    def _observe_codex_rollout(self, target: RolloutObservationTarget) -> None:
+        cursor = self.store.rollout_observation_cursor(
+            instance_id=target.instance_id,
+            rollout_device=target.rollout_device,
+            rollout_inode=target.rollout_inode,
+        )
+        scanned = scan_rollout(
+            Path(target.rollout_path),
+            codex_version=target.codex_version,
+            start_offset=cursor.offset,
+            expected_device=target.rollout_device,
+            expected_inode=target.rollout_inode,
+        )
+        lifecycle = target.lifecycle
+        active_turn_id = cursor.active_turn_id
+        pending_model = cursor.pending_model
+        pending_effort = cursor.pending_reasoning_effort
+        pending_evidence = cursor.pending_evidence_digest
+        pending_turn_id = cursor.pending_turn_id
+        for signal in scanned.signals:
+            if signal.kind == RolloutSignalKind.TURN_STARTED and signal.turn_id is not None:
+                lifecycle = LifecycleState.BUSY
+                active_turn_id = signal.turn_id
+            elif (
+                signal.kind == RolloutSignalKind.TURN_CONTEXT
+                and lifecycle == LifecycleState.BUSY
+                and signal.turn_id == active_turn_id
+            ):
+                pending_model = signal.model
+                pending_effort = signal.reasoning_effort
+                pending_evidence = signal.evidence_digest
+                pending_turn_id = signal.turn_id
+            elif (
+                signal.kind == RolloutSignalKind.TURN_COMPLETED
+                and signal.turn_id is not None
+                and signal.turn_id == active_turn_id
+            ):
+                lifecycle = LifecycleState.IDLE
+                active_turn_id = None
+
+        sequence = cursor.observation_sequence
+        last_model = cursor.last_model
+        last_effort = cursor.last_reasoning_effort
+        if (
+            scanned.at_eof
+            and pending_model is not None
+            and pending_effort is not None
+            and pending_evidence is not None
+            and pending_turn_id is not None
+        ):
+            effective = self.store.get_effective_spec(target.binding_id)
+            if effective is None:
+                raise ValueError("observed binding has no local effective spec")
+            spec, _codex_home, _profile_fingerprint = effective
+            observed = (pending_model, pending_effort)
+            if observed != (last_model, last_effort) and observed != (
+                spec.model,
+                spec.reasoning_effort,
+            ):
+                sequence += 1
+                evidence_digest = sha256_digest(
+                    {
+                        "instance_id": target.instance_id,
+                        "rollout_device": target.rollout_device,
+                        "rollout_inode": target.rollout_inode,
+                        "session_id": target.session_id,
+                        "turn_id": pending_turn_id,
+                        "provider_evidence_digest": pending_evidence,
+                    }
+                )
+                self.store.enqueue_observed_proposal(
+                    ObservedSpecProposal(
+                        binding_id=target.binding_id,
+                        base_generation_id=spec.generation_id,
+                        base_revision=spec.revision,
+                        base_spec_digest=spec.spec_digest,
+                        model=pending_model,
+                        reasoning_effort=pending_effort,
+                        instance_id=target.instance_id,
+                        observation_sequence=sequence,
+                        evidence_digest=evidence_digest,
+                    )
+                )
+            last_model = pending_model
+            last_effort = pending_effort
+            pending_model = None
+            pending_effort = None
+            pending_evidence = None
+            pending_turn_id = None
+        self.store.save_rollout_observation_cursor(
+            instance_id=target.instance_id,
+            rollout_device=target.rollout_device,
+            rollout_inode=target.rollout_inode,
+            cursor=RolloutObservationCursor(
+                offset=scanned.next_offset,
+                observation_sequence=sequence,
+                last_model=last_model,
+                last_reasoning_effort=last_effort,
+                active_turn_id=active_turn_id,
+                pending_model=pending_model,
+                pending_reasoning_effort=pending_effort,
+                pending_evidence_digest=pending_evidence,
+                pending_turn_id=pending_turn_id,
+            ),
+            lifecycle=str(lifecycle),
+        )
 
     def _cache(
         self,

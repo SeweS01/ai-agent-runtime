@@ -14,6 +14,8 @@ from ai_agent_runtime.domain import (
     ObservedSpecProposal,
     PendingEvidenceInstance,
     RegisteredInstance,
+    RolloutObservationCursor,
+    RolloutObservationTarget,
     RuntimeBinding,
     sha256_digest,
 )
@@ -101,6 +103,21 @@ CREATE TABLE IF NOT EXISTS applied_specs (
     evidence_json TEXT NOT NULL,
     verified_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS codex_rollout_observers (
+    instance_id TEXT PRIMARY KEY REFERENCES instances(instance_id) ON DELETE CASCADE,
+    rollout_device INTEGER NOT NULL,
+    rollout_inode INTEGER NOT NULL,
+    offset INTEGER NOT NULL,
+    observation_sequence INTEGER NOT NULL,
+    last_model TEXT,
+    last_reasoning_effort TEXT,
+    active_turn_id TEXT,
+    pending_model TEXT,
+    pending_reasoning_effort TEXT,
+    pending_evidence_digest TEXT,
+    pending_turn_id TEXT,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -122,6 +139,11 @@ class RuntimeStore:
             "TEXT NOT NULL DEFAULT 'MANAGED'",
         )
         self._ensure_column("instances", "launch_spec_json", "TEXT")
+        self._ensure_column("codex_rollout_observers", "active_turn_id", "TEXT")
+        self._ensure_column("codex_rollout_observers", "pending_model", "TEXT")
+        self._ensure_column("codex_rollout_observers", "pending_reasoning_effort", "TEXT")
+        self._ensure_column("codex_rollout_observers", "pending_evidence_digest", "TEXT")
+        self._ensure_column("codex_rollout_observers", "pending_turn_id", "TEXT")
         self._connection.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '1')"
         )
@@ -683,6 +705,119 @@ class RuntimeStore:
         if not isinstance(decoded, dict):
             raise ValueError("persisted AppliedSpec evidence is invalid")
         return decoded
+
+    def rollout_observation_targets(self) -> tuple[RolloutObservationTarget, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT i.instance_id, i.binding_id, i.lifecycle, a.evidence_json
+            FROM instances AS i
+            JOIN applied_specs AS a ON a.instance_id=i.instance_id
+            WHERE i.lifecycle IN ('IDLE', 'BUSY')
+            ORDER BY i.updated_at, i.instance_id
+            """
+        ).fetchall()
+        targets: list[RolloutObservationTarget] = []
+        for row in rows:
+            evidence = json.loads(row["evidence_json"])
+            if not isinstance(evidence, dict):
+                raise ValueError("persisted AppliedSpec evidence is invalid")
+            targets.append(
+                RolloutObservationTarget(
+                    instance_id=str(row["instance_id"]),
+                    binding_id=str(row["binding_id"]),
+                    lifecycle=str(row["lifecycle"]),
+                    rollout_path=str(evidence["rollout_path"]),
+                    rollout_device=int(evidence["rollout_device"]),
+                    rollout_inode=int(evidence["rollout_inode"]),
+                    session_id=str(evidence["session_id"]),
+                    codex_version=str(evidence["real_codex_version"]),
+                )
+            )
+        return tuple(targets)
+
+    def rollout_observation_cursor(
+        self,
+        *,
+        instance_id: str,
+        rollout_device: int,
+        rollout_inode: int,
+    ) -> RolloutObservationCursor:
+        row = self._connection.execute(
+            "SELECT * FROM codex_rollout_observers WHERE instance_id=?",
+            (instance_id,),
+        ).fetchone()
+        if row is None:
+            return RolloutObservationCursor(0, 0, None, None, None, None, None, None, None)
+        if row["rollout_device"] != rollout_device or row["rollout_inode"] != rollout_inode:
+            raise ValueError("observed rollout identity changed for live instance")
+        return RolloutObservationCursor(
+            offset=int(row["offset"]),
+            observation_sequence=int(row["observation_sequence"]),
+            last_model=row["last_model"],
+            last_reasoning_effort=row["last_reasoning_effort"],
+            active_turn_id=row["active_turn_id"],
+            pending_model=row["pending_model"],
+            pending_reasoning_effort=row["pending_reasoning_effort"],
+            pending_evidence_digest=row["pending_evidence_digest"],
+            pending_turn_id=row["pending_turn_id"],
+        )
+
+    def save_rollout_observation_cursor(
+        self,
+        *,
+        instance_id: str,
+        rollout_device: int,
+        rollout_inode: int,
+        cursor: RolloutObservationCursor,
+        lifecycle: str,
+    ) -> None:
+        if cursor.offset < 0 or cursor.observation_sequence < 0:
+            raise ValueError("invalid rollout observation cursor")
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO codex_rollout_observers(
+                    instance_id, rollout_device, rollout_inode, offset,
+                    observation_sequence, last_model, last_reasoning_effort,
+                    active_turn_id, pending_model, pending_reasoning_effort,
+                    pending_evidence_digest, pending_turn_id, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(instance_id) DO UPDATE SET
+                    rollout_device=excluded.rollout_device,
+                    rollout_inode=excluded.rollout_inode,
+                    offset=excluded.offset,
+                    observation_sequence=excluded.observation_sequence,
+                    last_model=excluded.last_model,
+                    last_reasoning_effort=excluded.last_reasoning_effort,
+                    active_turn_id=excluded.active_turn_id,
+                    pending_model=excluded.pending_model,
+                    pending_reasoning_effort=excluded.pending_reasoning_effort,
+                    pending_evidence_digest=excluded.pending_evidence_digest,
+                    pending_turn_id=excluded.pending_turn_id,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    instance_id,
+                    rollout_device,
+                    rollout_inode,
+                    cursor.offset,
+                    cursor.observation_sequence,
+                    cursor.last_model,
+                    cursor.last_reasoning_effort,
+                    cursor.active_turn_id,
+                    cursor.pending_model,
+                    cursor.pending_reasoning_effort,
+                    cursor.pending_evidence_digest,
+                    cursor.pending_turn_id,
+                    time.time(),
+                ),
+            )
+            updated = self._connection.execute(
+                "UPDATE instances SET lifecycle=?, updated_at=? WHERE instance_id=?",
+                (lifecycle, time.time(), instance_id),
+            )
+            if updated.rowcount != 1:
+                raise KeyError(f"unknown instance: {instance_id}")
 
     def session_owner(self, session_id: str) -> tuple[str, str] | None:
         row = self._connection.execute(

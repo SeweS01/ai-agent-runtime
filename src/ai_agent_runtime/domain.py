@@ -197,6 +197,31 @@ class PendingEvidenceInstance:
 
 
 @dataclass(frozen=True, slots=True)
+class RolloutObservationTarget:
+    instance_id: str
+    binding_id: str
+    lifecycle: str
+    rollout_path: str
+    rollout_device: int
+    rollout_inode: int
+    session_id: str
+    codex_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutObservationCursor:
+    offset: int
+    observation_sequence: int
+    last_model: str | None
+    last_reasoning_effort: str | None
+    active_turn_id: str | None
+    pending_model: str | None
+    pending_reasoning_effort: str | None
+    pending_evidence_digest: str | None
+    pending_turn_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RegisteredInstance:
     instance_id: str
     binding_id: str
