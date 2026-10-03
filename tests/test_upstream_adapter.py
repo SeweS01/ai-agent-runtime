@@ -11,6 +11,7 @@ from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
     read_topic_config,
     reconcile_managed_topic,
+    reconcile_managed_topics,
 )
 
 
@@ -52,6 +53,31 @@ def test_topic_reconcile_never_creates_missing_key_and_preserves_unknown(
     assert entry is not None
     assert entry.raw["custom"] == 7
     assert entry.is_managed_candidate
+    assert len(list((tmp_path / "backups").iterdir())) == 1
+
+
+def test_topic_snapshot_reconcile_is_one_atomic_write(tmp_path: Path) -> None:
+    path = tmp_path / "topic_config.json"
+    _write_json(
+        path,
+        {
+            "topics": {
+                "42": {"cwd": "/old-a", "engine": "claude", "custom": "a"},
+                "43": {"cwd": "/old-b", "engine": "claude", "custom": "b"},
+            }
+        },
+    )
+    before = read_topic_config(path)
+    after = reconcile_managed_topics(
+        path,
+        managed_topics={42: "/new-a", 43: "/new-b"},
+        expected_digest=before.digest,
+        backup_dir=tmp_path / "backups",
+    )
+    assert after.topic(42).cwd == "/new-a"  # type: ignore[union-attr]
+    assert after.topic(43).cwd == "/new-b"  # type: ignore[union-attr]
+    assert after.topic(42).raw["custom"] == "a"  # type: ignore[union-attr]
+    assert after.topic(43).raw["custom"] == "b"  # type: ignore[union-attr]
     assert len(list((tmp_path / "backups").iterdir())) == 1
 
 

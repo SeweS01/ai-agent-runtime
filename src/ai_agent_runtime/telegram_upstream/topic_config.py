@@ -75,20 +75,42 @@ def reconcile_managed_topic(
     the returned digest and keep watching for a later lost update.
     """
 
+    return reconcile_managed_topics(
+        path,
+        managed_topics={thread_id: cwd},
+        expected_digest=expected_digest,
+        backup_dir=backup_dir,
+    )
+
+
+def reconcile_managed_topics(
+    path: Path,
+    *,
+    managed_topics: dict[int, str],
+    expected_digest: str | None,
+    backup_dir: Path,
+) -> TopicConfigSnapshot:
+    """Patch multiple upstream-created topics in one atomic file replacement."""
+
+    if not managed_topics:
+        raise ValueError("at least one managed topic is required")
+    if any(thread_id <= 0 or not cwd for thread_id, cwd in managed_topics.items()):
+        raise ValueError("managed topics require positive thread ids and non-empty cwd")
+
     before = read_topic_config(path)
     if expected_digest is not None and before.digest != expected_digest:
         raise RuntimeError("topic_config changed before reconciliation")
-    topics = before.raw["topics"]
-    assert isinstance(topics, dict)
-    current = topics.get(str(thread_id))
-    if not isinstance(current, dict):
-        raise KeyError(f"upstream topic key does not exist: {thread_id}")
-
-    updated_entry = dict(current)
-    updated_entry.update({"cwd": cwd, "engine": "codex", "exec_mode": "tmux"})
+    raw_topics = before.raw["topics"]
+    assert isinstance(raw_topics, dict)
     updated_root = dict(before.raw)
-    updated_topics = dict(topics)
-    updated_topics[str(thread_id)] = updated_entry
+    updated_topics = dict(raw_topics)
+    for thread_id, cwd in managed_topics.items():
+        current = updated_topics.get(str(thread_id))
+        if not isinstance(current, dict):
+            raise KeyError(f"upstream topic key does not exist: {thread_id}")
+        updated_entry = dict(current)
+        updated_entry.update({"cwd": cwd, "engine": "codex", "exec_mode": "tmux"})
+        updated_topics[str(thread_id)] = updated_entry
     updated_root["topics"] = updated_topics
 
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -115,7 +137,8 @@ def reconcile_managed_topic(
         tmp_path.unlink(missing_ok=True)
 
     after = read_topic_config(path)
-    actual = after.topic(thread_id)
-    if actual is None or actual.cwd != cwd or not actual.is_managed_candidate:
-        raise RuntimeError("topic_config post-write verification failed")
+    for thread_id, cwd in managed_topics.items():
+        actual = after.topic(thread_id)
+        if actual is None or actual.cwd != cwd or not actual.is_managed_candidate:
+            raise RuntimeError("topic_config post-write verification failed")
     return after

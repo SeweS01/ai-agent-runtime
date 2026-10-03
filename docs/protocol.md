@@ -34,7 +34,15 @@ Telegram Agent configuration, Runtime verifies:
 The upstream-created topic key must already exist. Runtime then performs a fresh-read
 allowlisted patch, atomic replace, backup, and post-write verification before storing
 the local effective spec. A different generation is rejected from this incremental
-action and requires the future authoritative snapshot-reconcile action.
+action and requires `apply_snapshot`.
+
+`apply_snapshot` is the only action allowed to introduce a new generation. It
+contains the complete AgentInstance desired inventory, one common generation, a
+canonical snapshot digest, and explicit `retired_binding_ids`. Runtime validates all
+identities, profiles, digests, topic keys, and inventory coverage before one batched
+topic-config replacement and one SQLite transaction. Existing bindings may not be
+silently omitted. Retirement disables future managed launches and removes the local
+effective spec, but preserves binding, instance, and session-provenance history.
 
 This protocol is local execution control, not a public CUS backend API. The CUS
 backend remains provider-neutral and talks through its Runtime connector.

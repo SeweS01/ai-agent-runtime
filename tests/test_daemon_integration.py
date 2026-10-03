@@ -10,7 +10,7 @@ import pytest
 
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
-from ai_agent_runtime.domain import DesiredSpec, RuntimeBinding
+from ai_agent_runtime.domain import DesiredSpec, RuntimeBinding, sha256_digest
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.process_safety import proc_starttime, profile_fingerprint
@@ -327,6 +327,122 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
     assert replayed["ok"] is True
     assert replayed["local_effective"] == applied["local_effective"]
     assert len(list((config.state_dir / "topic-config-backups").iterdir())) == 1
+
+    next_spec = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(project),
+        provider="codex",
+        account_profile="work",
+        model="gpt-next",
+        reasoning_effort="medium",
+        generation_id="gen-2",
+        revision=1,
+    )
+    next_desired = {
+        "binding_id": next_spec.binding_id,
+        "agent_instance_id": next_spec.agent_instance_id,
+        "project_id": next_spec.project_id,
+        "canonical_cwd": next_spec.canonical_cwd,
+        "provider": next_spec.provider,
+        "account_profile": next_spec.account_profile,
+        "model": next_spec.model,
+        "reasoning_effort": next_spec.reasoning_effort,
+        "generation_id": next_spec.generation_id,
+        "revision": next_spec.revision,
+        "spec_digest": next_spec.spec_digest,
+    }
+    snapshot_items = [{"binding": payload["binding"], "desired": next_desired}]
+    snapshot_material = {
+        "agent_instance_id": "agent-1",
+        "generation_id": "gen-2",
+        "bindings": snapshot_items,
+        "retired_binding_ids": [],
+    }
+    snapshot = await request(
+        config.socket_path,
+        versioned(
+            "apply_snapshot",
+            str(uuid.uuid4()),
+            **snapshot_material,
+            snapshot_digest=sha256_digest(snapshot_material),
+        ),
+    )
+    assert snapshot["ok"] is True
+    assert snapshot["generation_id"] == "gen-2"
+    assert restarted.store.get_effective_spec("binding-1")[0] == next_spec  # type: ignore[index]
+
+    stale_snapshot_spec = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(project),
+        provider="codex",
+        account_profile="work",
+        model="stale-snapshot",
+        reasoning_effort="low",
+        generation_id="gen-2",
+        revision=0,
+    )
+    stale_snapshot_desired = {
+        **next_desired,
+        "revision": stale_snapshot_spec.revision,
+        "model": stale_snapshot_spec.model,
+        "reasoning_effort": stale_snapshot_spec.reasoning_effort,
+        "spec_digest": stale_snapshot_spec.spec_digest,
+    }
+    stale_snapshot_items = [{"binding": payload["binding"], "desired": stale_snapshot_desired}]
+    stale_snapshot_material = {
+        "agent_instance_id": "agent-1",
+        "generation_id": "gen-2",
+        "bindings": stale_snapshot_items,
+        "retired_binding_ids": [],
+    }
+    backups_before_stale_snapshot = len(list((config.state_dir / "topic-config-backups").iterdir()))
+    stale_snapshot = await request(
+        config.socket_path,
+        versioned(
+            "apply_snapshot",
+            str(uuid.uuid4()),
+            **stale_snapshot_material,
+            snapshot_digest=sha256_digest(stale_snapshot_material),
+        ),
+    )
+    assert stale_snapshot["ok"] is False
+    assert len(list((config.state_dir / "topic-config-backups").iterdir())) == (
+        backups_before_stale_snapshot
+    )
+
+    gen_three = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(project),
+        provider="codex",
+        account_profile="work",
+        model="gpt-three",
+        reasoning_effort="high",
+        generation_id="gen-3",
+        revision=1,
+    )
+    incremental_generation_change = await request(
+        config.socket_path,
+        versioned(
+            "apply_binding",
+            str(uuid.uuid4()),
+            binding=payload["binding"],
+            desired={
+                **next_desired,
+                "generation_id": gen_three.generation_id,
+                "model": gen_three.model,
+                "reasoning_effort": gen_three.reasoning_effort,
+                "spec_digest": gen_three.spec_digest,
+            },
+        ),
+    )
+    assert incremental_generation_change["ok"] is False
+    assert incremental_generation_change["error"]["code"] == "GENERATION_RECONCILE_REQUIRED"
 
     conflicting = dict(payload)
     conflicting["desired"] = {**desired_payload, "model": "different"}

@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS effective_specs (
     profile_fingerprint TEXT NOT NULL,
     verified_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS desired_namespaces (
+    agent_instance_id TEXT PRIMARY KEY,
+    generation_id TEXT NOT NULL,
+    snapshot_digest TEXT,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS session_provenance (
     session_id TEXT PRIMARY KEY,
     binding_id TEXT NOT NULL REFERENCES bindings(binding_id),
@@ -235,24 +241,17 @@ class RuntimeStore:
         profile_fingerprint: str,
     ) -> None:
         self.validate_effective_spec_update(spec)
-        payload = json.dumps(
-            {
-                "binding_id": spec.binding_id,
-                "agent_instance_id": spec.agent_instance_id,
-                "project_id": spec.project_id,
-                "canonical_cwd": spec.canonical_cwd,
-                "provider": spec.provider,
-                "account_profile": spec.account_profile,
-                "model": spec.model,
-                "reasoning_effort": spec.reasoning_effort,
-                "generation_id": spec.generation_id,
-                "revision": spec.revision,
-                "spec_digest": spec.spec_digest,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        payload = self._encode_spec(spec)
         with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO desired_namespaces(
+                    agent_instance_id, generation_id, snapshot_digest, updated_at
+                ) VALUES(?, ?, NULL, ?)
+                ON CONFLICT(agent_instance_id) DO UPDATE SET updated_at=excluded.updated_at
+                """,
+                (spec.agent_instance_id, spec.generation_id, time.time()),
+            )
             self._connection.execute(
                 """
                 INSERT INTO effective_specs(
@@ -283,6 +282,12 @@ class RuntimeStore:
     def validate_effective_spec_update(self, spec: DesiredSpec) -> None:
         if not spec.verify_digest():
             raise ValueError("desired spec digest mismatch")
+        namespace = self._connection.execute(
+            "SELECT generation_id FROM desired_namespaces WHERE agent_instance_id=?",
+            (spec.agent_instance_id,),
+        ).fetchone()
+        if namespace is not None and namespace["generation_id"] != spec.generation_id:
+            raise ValueError("new generation requires authoritative snapshot reconcile")
         existing = self._connection.execute(
             "SELECT generation_id, revision, spec_digest FROM effective_specs WHERE binding_id=?",
             (spec.binding_id,),
@@ -297,6 +302,175 @@ class RuntimeStore:
                 and spec.spec_digest != existing["spec_digest"]
             ):
                 raise ValueError("same revision has a different digest")
+
+    def namespace_generation(self, agent_instance_id: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT generation_id FROM desired_namespaces WHERE agent_instance_id=?",
+            (agent_instance_id,),
+        ).fetchone()
+        return None if row is None else str(row["generation_id"])
+
+    @staticmethod
+    def _encode_spec(spec: DesiredSpec) -> str:
+        return json.dumps(
+            {
+                "binding_id": spec.binding_id,
+                "agent_instance_id": spec.agent_instance_id,
+                "project_id": spec.project_id,
+                "canonical_cwd": spec.canonical_cwd,
+                "provider": spec.provider,
+                "account_profile": spec.account_profile,
+                "model": spec.model,
+                "reasoning_effort": spec.reasoning_effort,
+                "generation_id": spec.generation_id,
+                "revision": spec.revision,
+                "spec_digest": spec.spec_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def apply_authoritative_snapshot(
+        self,
+        *,
+        agent_instance_id: str,
+        generation_id: str,
+        snapshot_digest: str,
+        updates: tuple[tuple[RuntimeBinding, DesiredSpec, Path, str], ...],
+        retired_binding_ids: frozenset[str],
+    ) -> None:
+        """Atomically replace desired state without deleting runtime history."""
+
+        if not updates and not retired_binding_ids:
+            raise ValueError("authoritative snapshot cannot be empty")
+        if not snapshot_digest.startswith("sha256:"):
+            raise ValueError("snapshot digest must be sha256-prefixed")
+        active_ids = {binding.binding_id for binding, _spec, _home, _fingerprint in updates}
+        if len(active_ids) != len(updates):
+            raise ValueError("snapshot contains duplicate binding ids")
+        if active_ids & retired_binding_ids:
+            raise ValueError("binding cannot be active and retired in the same snapshot")
+
+        known = {binding.binding_id for binding in self.list_bindings(agent_instance_id)}
+        if retired_binding_ids - known:
+            raise ValueError("snapshot retires an unknown binding")
+        omitted = known - active_ids - retired_binding_ids
+        if omitted:
+            raise ValueError(
+                "snapshot omits existing bindings without explicit retirement: "
+                + ", ".join(sorted(omitted))
+            )
+
+        topics: set[tuple[int, int]] = set()
+        sessions: set[str] = set()
+        current_namespace = self._connection.execute(
+            "SELECT generation_id FROM desired_namespaces WHERE agent_instance_id=?",
+            (agent_instance_id,),
+        ).fetchone()
+        same_generation = (
+            current_namespace is not None and current_namespace["generation_id"] == generation_id
+        )
+        for binding, spec, _codex_home, _fingerprint in updates:
+            if binding.agent_instance_id != agent_instance_id:
+                raise ValueError("snapshot binding AgentInstance mismatch")
+            if spec.agent_instance_id != agent_instance_id or spec.generation_id != generation_id:
+                raise ValueError("snapshot desired namespace mismatch")
+            if binding.binding_id != spec.binding_id:
+                raise ValueError("snapshot binding/spec identity mismatch")
+            if not spec.verify_digest():
+                raise ValueError("desired spec digest mismatch")
+            topic = (binding.chat_id, binding.thread_id)
+            if topic in topics or binding.expected_tmux_session in sessions:
+                raise ValueError("snapshot contains duplicate topic or tmux identity")
+            topics.add(topic)
+            sessions.add(binding.expected_tmux_session)
+            existing = self.get_binding(binding.binding_id)
+            if existing is not None and (
+                existing.agent_instance_id != binding.agent_instance_id
+                or existing.chat_id != binding.chat_id
+                or existing.thread_id != binding.thread_id
+                or existing.project_id != binding.project_id
+                or existing.canonical_cwd != binding.canonical_cwd
+            ):
+                raise ValueError("binding identity is immutable")
+            if same_generation:
+                self.validate_effective_spec_update(spec)
+
+        now = time.time()
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO desired_namespaces(
+                    agent_instance_id, generation_id, snapshot_digest, updated_at
+                ) VALUES(?, ?, ?, ?)
+                ON CONFLICT(agent_instance_id) DO UPDATE SET
+                    generation_id=excluded.generation_id,
+                    snapshot_digest=excluded.snapshot_digest,
+                    updated_at=excluded.updated_at
+                """,
+                (agent_instance_id, generation_id, snapshot_digest, now),
+            )
+            for binding, spec, codex_home, fingerprint in updates:
+                self._connection.execute(
+                    """
+                    INSERT INTO bindings(
+                        binding_id, agent_instance_id, chat_id, thread_id, project_id,
+                        canonical_cwd, expected_tmux_session, configured,
+                        config_digest, management_mode
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(binding_id) DO UPDATE SET
+                        configured=excluded.configured,
+                        config_digest=excluded.config_digest,
+                        management_mode=excluded.management_mode
+                    """,
+                    (
+                        binding.binding_id,
+                        binding.agent_instance_id,
+                        binding.chat_id,
+                        binding.thread_id,
+                        binding.project_id,
+                        binding.canonical_cwd,
+                        binding.expected_tmux_session,
+                        int(binding.configured),
+                        binding.config_digest,
+                        binding.management_mode,
+                    ),
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO effective_specs(
+                        binding_id, generation_id, revision, spec_digest, payload_json,
+                        codex_home, profile_fingerprint, verified_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(binding_id) DO UPDATE SET
+                        generation_id=excluded.generation_id,
+                        revision=excluded.revision,
+                        spec_digest=excluded.spec_digest,
+                        payload_json=excluded.payload_json,
+                        codex_home=excluded.codex_home,
+                        profile_fingerprint=excluded.profile_fingerprint,
+                        verified_at=excluded.verified_at
+                    """,
+                    (
+                        spec.binding_id,
+                        spec.generation_id,
+                        spec.revision,
+                        spec.spec_digest,
+                        self._encode_spec(spec),
+                        str(codex_home),
+                        fingerprint,
+                        now,
+                    ),
+                )
+            for binding_id in retired_binding_ids:
+                self._connection.execute(
+                    "UPDATE bindings SET configured=0 WHERE binding_id=?",
+                    (binding_id,),
+                )
+                self._connection.execute(
+                    "DELETE FROM effective_specs WHERE binding_id=?",
+                    (binding_id,),
+                )
 
     def get_effective_spec(self, binding_id: str) -> tuple[DesiredSpec, Path, str] | None:
         row = self._connection.execute(

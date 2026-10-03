@@ -42,6 +42,7 @@ from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
     read_topic_config,
     reconcile_managed_topic,
+    reconcile_managed_topics,
 )
 
 _PEERCRED = struct.Struct("3i")
@@ -130,6 +131,8 @@ class RuntimeServer:
                 response = self._ok(request_id, summary=self.store.summary())
             elif action == "apply_binding":
                 response = self._apply_binding(request_id, payload)
+            elif action == "apply_snapshot":
+                response = self._apply_snapshot(request_id, payload)
             elif action == "outbox_pull":
                 limit = payload.get("limit", 50)
                 if not isinstance(limit, int):
@@ -413,6 +416,262 @@ class RuntimeServer:
                 "spec_digest": spec.spec_digest,
                 "profile_fingerprint": fingerprint,
             },
+        )
+
+    def _apply_snapshot(self, request_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        agent_instance_id = _required_str(payload, "agent_instance_id")
+        if agent_instance_id != self.config.agent_instance_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance mismatch")
+        generation_id = _required_str(payload, "generation_id")
+        snapshot_digest = _required_str(payload, "snapshot_digest")
+        raw_items = payload.get("bindings")
+        raw_retired = payload.get("retired_binding_ids", [])
+        if not isinstance(raw_items, list) or not isinstance(raw_retired, list):
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "bindings and retired_binding_ids must be arrays",
+            )
+        if len(raw_items) > 1000 or len(raw_retired) > 1000:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "snapshot is too large")
+        if any(not isinstance(value, str) or not value for value in raw_retired):
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "invalid retired binding id")
+        retired = frozenset(raw_retired)
+        if len(retired) != len(raw_retired):
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "duplicate retired binding id")
+        normalized_items: list[dict[str, Any]] = []
+        prepared: list[tuple[RuntimeBinding, DesiredSpec, Path, str]] = []
+        managed_topics: dict[int, str] = {}
+        binding_ids: set[str] = set()
+        tmux_sessions: set[str] = set()
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "snapshot item must be object")
+            raw_binding = raw_item.get("binding")
+            raw_desired = raw_item.get("desired")
+            if not isinstance(raw_binding, dict) or not isinstance(raw_desired, dict):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "snapshot item requires binding and desired objects",
+                )
+            binding, spec, codex_home, fingerprint = self._validate_snapshot_item(
+                raw_binding,
+                raw_desired,
+                generation_id=generation_id,
+            )
+            if binding.thread_id in managed_topics:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "snapshot contains duplicate Telegram topic",
+                )
+            if binding.binding_id in binding_ids or binding.expected_tmux_session in tmux_sessions:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "snapshot contains duplicate binding or tmux identity",
+                )
+            binding_ids.add(binding.binding_id)
+            tmux_sessions.add(binding.expected_tmux_session)
+            managed_topics[binding.thread_id] = binding.canonical_cwd
+            prepared.append((binding, spec, codex_home, fingerprint))
+            normalized_items.append({"binding": raw_binding, "desired": raw_desired})
+
+        digest_material = {
+            "agent_instance_id": agent_instance_id,
+            "generation_id": generation_id,
+            "bindings": sorted(
+                normalized_items,
+                key=lambda item: str(item["binding"].get("binding_id", "")),
+            ),
+            "retired_binding_ids": sorted(retired),
+        }
+        if snapshot_digest != sha256_digest(digest_material):
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "snapshot digest mismatch")
+
+        known_ids = {
+            binding.binding_id
+            for binding in self.store.list_bindings(self.config.agent_instance_id)
+        }
+        active_ids = {binding.binding_id for binding, _spec, _home, _fp in prepared}
+        if retired - known_ids:
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "snapshot retires an unknown binding",
+            )
+        if active_ids & retired:
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "binding cannot be active and retired in the same snapshot",
+            )
+        if known_ids - active_ids - retired:
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "snapshot omits existing bindings without explicit retirement",
+            )
+        for known in self.store.list_bindings(self.config.agent_instance_id):
+            collision = next(
+                (
+                    binding
+                    for binding, _spec, _home, _fp in prepared
+                    if binding.binding_id != known.binding_id
+                    and (
+                        binding.thread_id == known.thread_id
+                        or binding.expected_tmux_session == known.expected_tmux_session
+                    )
+                ),
+                None,
+            )
+            if collision is not None:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "snapshot reuses an existing topic or tmux identity",
+                )
+        if self.store.namespace_generation(agent_instance_id) == generation_id:
+            try:
+                for _binding, spec, _home, _fingerprint in prepared:
+                    self.store.validate_effective_spec_update(spec)
+            except ValueError as exc:
+                raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
+
+        snapshot = read_topic_config(self.config.topic_config_path)
+        if managed_topics:
+            for _ in range(3):
+                try:
+                    snapshot = reconcile_managed_topics(
+                        self.config.topic_config_path,
+                        managed_topics=managed_topics,
+                        expected_digest=snapshot.digest,
+                        backup_dir=self.config.state_dir / "topic-config-backups",
+                    )
+                    break
+                except KeyError as exc:
+                    raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
+                except RuntimeError:
+                    snapshot = read_topic_config(self.config.topic_config_path)
+            else:
+                raise RuntimeFailureError(
+                    ErrorCode.CONFIG_DRIFT,
+                    "topic_config changed during all snapshot reconciliation attempts",
+                )
+        finalized = tuple(
+            (
+                RuntimeBinding(
+                    binding_id=binding.binding_id,
+                    agent_instance_id=binding.agent_instance_id,
+                    chat_id=binding.chat_id,
+                    thread_id=binding.thread_id,
+                    project_id=binding.project_id,
+                    canonical_cwd=binding.canonical_cwd,
+                    expected_tmux_session=binding.expected_tmux_session,
+                    configured=True,
+                    config_digest=snapshot.digest,
+                    management_mode=ManagementMode.MANAGED,
+                ),
+                spec,
+                codex_home,
+                fingerprint,
+            )
+            for binding, spec, codex_home, fingerprint in prepared
+        )
+        try:
+            self.store.apply_authoritative_snapshot(
+                agent_instance_id=agent_instance_id,
+                generation_id=generation_id,
+                snapshot_digest=snapshot_digest,
+                updates=finalized,
+                retired_binding_ids=retired,
+            )
+        except ValueError as exc:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
+        return self._ok(
+            request_id,
+            agent_instance_id=agent_instance_id,
+            generation_id=generation_id,
+            snapshot_digest=snapshot_digest,
+            applied_bindings=sorted(active_ids),
+            retired_bindings=sorted(retired),
+            config_digest=snapshot.digest,
+        )
+
+    def _validate_snapshot_item(
+        self,
+        raw_binding: dict[str, Any],
+        raw_desired: dict[str, Any],
+        *,
+        generation_id: str,
+    ) -> tuple[RuntimeBinding, DesiredSpec, Path, str]:
+        agent_instance_id = _required_str(raw_binding, "agent_instance_id")
+        if agent_instance_id != self.config.agent_instance_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance mismatch")
+        chat_id = _required_int(raw_binding, "chat_id")
+        if chat_id != self.config.forum_chat_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "forum chat mismatch")
+        thread_id = _required_int(raw_binding, "thread_id")
+        if thread_id <= 0:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "thread_id must be positive")
+        binding_id = _required_str(raw_binding, "binding_id")
+        project_id = _required_str(raw_binding, "project_id")
+        requested_cwd = validate_project_path(
+            Path(_required_str(raw_binding, "canonical_cwd")),
+            allowed_roots=self.config.allowed_project_roots,
+        )
+        spec = _desired_spec(raw_desired)
+        if (
+            spec.binding_id != binding_id
+            or spec.agent_instance_id != agent_instance_id
+            or spec.project_id != project_id
+            or Path(spec.canonical_cwd) != requested_cwd
+        ):
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "desired identity mismatch")
+        if spec.generation_id != generation_id:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "desired generation mismatch")
+        if spec.provider != "codex":
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "V1 managed provider must be codex",
+            )
+        existing = self.store.get_binding(binding_id)
+        if existing is not None and (
+            existing.agent_instance_id != agent_instance_id
+            or existing.chat_id != chat_id
+            or existing.thread_id != thread_id
+            or existing.project_id != project_id
+        ):
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "binding identity is immutable")
+        if existing is not None and Path(existing.canonical_cwd) != requested_cwd:
+            raise RuntimeFailureError(
+                ErrorCode.PROJECT_RELOCATION_REQUIRED,
+                "project path change requires explicit relocation",
+            )
+        profile_name = spec.account_profile
+        if (
+            not profile_name
+            or profile_name in {".", ".."}
+            or Path(profile_name).name != profile_name
+        ):
+            raise RuntimeFailureError(ErrorCode.UNSAFE_PROFILE, "invalid account profile name")
+        codex_home = validate_profile_path(
+            self.config.profiles_root / profile_name,
+            root=self.config.profiles_root,
+        )
+        adapter = TelegramUpstreamAdapter(
+            self.config.upstream_sha,
+            self.config.tmux_session_prefix,
+        )
+        return (
+            RuntimeBinding(
+                binding_id=binding_id,
+                agent_instance_id=agent_instance_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                project_id=project_id,
+                canonical_cwd=str(requested_cwd),
+                expected_tmux_session=adapter.expected_session_name(
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                ),
+            ),
+            spec,
+            codex_home,
+            profile_fingerprint(codex_home),
         )
 
     async def _verify_started(
