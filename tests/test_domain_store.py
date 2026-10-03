@@ -219,6 +219,7 @@ def test_status_distinguishes_unverified_pending_and_exited_instances(tmp_path: 
     assert store.status_report("agent-1")["bindings"][0]["health"] == (  # type: ignore[index]
         "PENDING_CHANGE"
     )
+
     store.mark_instance_exited(
         instance_id="instance-1",
         binding_id="binding-1",
@@ -230,3 +231,81 @@ def test_status_distinguishes_unverified_pending_and_exited_instances(tmp_path: 
     final = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
     assert final["health"] == "RUNTIME_HEALTHY"  # type: ignore[index]
     assert final["instances"][0]["lifecycle"] == "EXITED"  # type: ignore[index]
+
+
+def test_retirement_candidate_survives_late_child_exit_notification(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path / "runtime.sqlite")
+    binding = RuntimeBinding(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        chat_id=-1001,
+        thread_id=42,
+        project_id="project-1",
+        canonical_cwd="/srv/project",
+        expected_tmux_session="cc-n1001-42",
+    )
+    store.upsert_binding(binding)
+    applied = _spec()
+    store.put_effective_spec(applied, codex_home=tmp_path, profile_fingerprint="fp")
+    store.record_instance(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        wrapper_pid=100,
+        wrapper_starttime=10,
+        child_pid=101,
+        child_starttime=11,
+        tmux_session="cc-n1001-42",
+        tmux_pane="%1",
+        lifecycle="IDLE",
+        applied_digest=None,
+    )
+    store.record_applied_spec(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        spec=applied,
+        evidence={"verified": True},
+        session_id="session-1",
+        account_profile="work",
+        rollout_path="/rollout",
+        rollout_device=1,
+        rollout_inode=2,
+    )
+    store.put_effective_spec(_spec(2), codex_home=tmp_path, profile_fingerprint="fp")
+
+    store.record_instance(
+        instance_id="instance-2",
+        binding_id="binding-1",
+        wrapper_pid=200,
+        wrapper_starttime=20,
+        child_pid=201,
+        child_starttime=21,
+        tmux_session="cc-n1001-42-duplicate",
+        tmux_pane="%2",
+        lifecycle="IDLE",
+        applied_digest=None,
+    )
+    assert store.retirement_candidates() == ()
+    store.mark_instance_exited(
+        instance_id="instance-2",
+        binding_id="binding-1",
+        wrapper_pid=200,
+        wrapper_starttime=20,
+        child_pid=201,
+        child_starttime=21,
+    )
+
+    candidates = store.retirement_candidates()
+    assert len(candidates) == 1
+    store.mark_instance_retired(candidates[0])
+    store.mark_instance_exited(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        wrapper_pid=100,
+        wrapper_starttime=10,
+        child_pid=101,
+        child_starttime=11,
+    )
+
+    report = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert report["health"] == "PENDING_CHANGE"  # type: ignore[index]
+    assert report["instances"][0]["lifecycle"] == "RETIRED_FOR_RESTART"  # type: ignore[index]

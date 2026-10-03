@@ -20,6 +20,11 @@ Required blocking gates include:
 Failure of a gate blocks the release. It does not authorize a Telegram Agent patch,
 overlay, `.pth` shadowing, a silent UX change, or unmanaged Codex fallback.
 
+Runtime retirement is additionally feature-gated in configuration. It remains off by
+default; `retirement_enabled = true` is invalid without a non-empty
+`retirement_qualification_report_id`. That identifier is an audit reference, not a
+substitute for the evidence required above.
+
 The source-level baseline checks can be run against a clean checkout:
 
 ```bash

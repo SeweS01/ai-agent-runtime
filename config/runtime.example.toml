@@ -19,3 +19,7 @@ profiles_root = "/home/devops/.local/share/ai-agent-runtime/profiles"
 
 [policy]
 allowed_project_roots = ["/home/devops/workspace"]
+# This must remain false until the exact release tuple has passed the mandatory
+# deterministic queue/paste/turn retirement race matrix.
+retirement_enabled = false
+retirement_qualification_report_id = ""

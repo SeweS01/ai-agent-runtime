@@ -58,6 +58,7 @@ class TmuxPaneProcess:
     pane_id: str
     session_name: str
     pane_pid: int
+    session_id: str = ""
 
 
 def _tmux_socket_from_environment(value: str) -> Path:
@@ -87,7 +88,7 @@ def inspect_tmux_pane(socket_path: Path, pane_id: str) -> TmuxPaneProcess:
             "list-panes",
             "-a",
             "-F",
-            "#{pane_id}\t#{session_name}\t#{pane_pid}",
+            "#{pane_id}\t#{session_name}\t#{pane_pid}\t#{session_id}",
         ),
         check=False,
         capture_output=True,
@@ -99,14 +100,21 @@ def inspect_tmux_pane(socket_path: Path, pane_id: str) -> TmuxPaneProcess:
     matches: list[TmuxPaneProcess] = []
     for line in completed.stdout.splitlines():
         raw_pane, separator, remainder = line.partition("\t")
-        session_name, second_separator, raw_pid = remainder.partition("\t")
-        if not separator or not second_separator or raw_pane != pane_id:
+        session_name, second_separator, pid_and_session = remainder.partition("\t")
+        raw_pid, third_separator, session_id = pid_and_session.partition("\t")
+        if (
+            not separator
+            or not second_separator
+            or not third_separator
+            or raw_pane != pane_id
+            or not session_id
+        ):
             continue
         try:
             pane_pid = int(raw_pid)
         except ValueError:
             continue
-        matches.append(TmuxPaneProcess(raw_pane, session_name, pane_pid))
+        matches.append(TmuxPaneProcess(raw_pane, session_name, pane_pid, session_id))
     if len(matches) != 1:
         raise RuntimeFailureError(
             ErrorCode.AMBIGUOUS,
@@ -135,6 +143,37 @@ def verify_wrapper_identity(identity: WrapperIdentity) -> None:
             ErrorCode.AMBIGUOUS,
             "tmux pane/session/process identity mismatch",
         )
+
+
+def retire_tmux_session(identity: WrapperIdentity) -> None:
+    """Kill only the exact tmux session proven to contain this wrapper."""
+
+    verify_wrapper_identity(identity)
+    environment = proc_environment(identity.pid)
+    tmux_value = environment.get("TMUX")
+    if not tmux_value:
+        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "wrapper has no TMUX environment")
+    socket_path = _tmux_socket_from_environment(tmux_value)
+    pane = inspect_tmux_pane(socket_path, identity.tmux_pane)
+    if (
+        pane.pane_id != identity.tmux_pane
+        or pane.session_name != identity.tmux_session
+        or pane.pane_pid != identity.pid
+        or not pane.session_id
+    ):
+        raise RuntimeFailureError(
+            ErrorCode.AMBIGUOUS,
+            "tmux retirement target changed after identity verification",
+        )
+    completed = subprocess.run(
+        ("tmux", "-S", str(socket_path), "kill-session", "-t", pane.session_id),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "exact tmux retirement failed")
 
 
 def file_sha256(path: Path) -> str:

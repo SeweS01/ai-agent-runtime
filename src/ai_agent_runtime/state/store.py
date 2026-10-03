@@ -14,6 +14,7 @@ from ai_agent_runtime.domain import (
     ObservedSpecProposal,
     PendingEvidenceInstance,
     RegisteredInstance,
+    RetirementCandidate,
     RolloutObservationCursor,
     RolloutObservationTarget,
     RuntimeBinding,
@@ -607,6 +608,7 @@ class RuntimeStore:
                 WHERE instance_id=? AND binding_id=?
                   AND wrapper_pid=? AND wrapper_starttime=?
                   AND child_pid=? AND child_starttime=?
+                  AND lifecycle != 'RETIRED_FOR_RESTART'
                 """,
                 (
                     time.time(),
@@ -619,7 +621,85 @@ class RuntimeStore:
                 ),
             )
             if updated.rowcount != 1:
-                raise KeyError("exited child does not match registered instance")
+                retired = self._connection.execute(
+                    """
+                    SELECT 1 FROM instances
+                    WHERE instance_id=? AND binding_id=?
+                      AND wrapper_pid=? AND wrapper_starttime=?
+                      AND child_pid=? AND child_starttime=?
+                      AND lifecycle='RETIRED_FOR_RESTART'
+                    """,
+                    (
+                        instance_id,
+                        binding_id,
+                        wrapper_pid,
+                        wrapper_starttime,
+                        child_pid,
+                        child_starttime,
+                    ),
+                ).fetchone()
+                if retired is None:
+                    raise KeyError("exited child does not match registered instance")
+
+    def retirement_candidates(self) -> tuple[RetirementCandidate, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT i.instance_id, i.binding_id, i.wrapper_pid, i.wrapper_starttime,
+                   i.tmux_session, i.tmux_pane, b.canonical_cwd,
+                   a.spec_digest AS applied_spec_digest,
+                   e.spec_digest AS desired_spec_digest
+            FROM instances AS i
+            JOIN bindings AS b ON b.binding_id=i.binding_id
+            JOIN applied_specs AS a ON a.instance_id=i.instance_id
+            JOIN effective_specs AS e ON e.binding_id=i.binding_id
+            WHERE i.lifecycle='IDLE'
+              AND b.configured=1
+              AND b.management_mode='MANAGED'
+              AND a.spec_digest != e.spec_digest
+              AND (
+                  SELECT count(*) FROM instances AS live
+                  WHERE live.binding_id=i.binding_id
+                    AND live.lifecycle NOT IN ('EXITED', 'RETIRED_FOR_RESTART')
+              ) = 1
+            ORDER BY i.updated_at, i.instance_id
+            """
+        ).fetchall()
+        return tuple(
+            RetirementCandidate(
+                instance_id=str(row["instance_id"]),
+                binding_id=str(row["binding_id"]),
+                wrapper_pid=int(row["wrapper_pid"]),
+                wrapper_starttime=int(row["wrapper_starttime"]),
+                tmux_session=str(row["tmux_session"]),
+                tmux_pane=str(row["tmux_pane"]),
+                canonical_cwd=str(row["canonical_cwd"]),
+                applied_spec_digest=str(row["applied_spec_digest"]),
+                desired_spec_digest=str(row["desired_spec_digest"]),
+            )
+            for row in rows
+        )
+
+    def mark_instance_retired(self, candidate: RetirementCandidate) -> None:
+        with self._connection:
+            updated = self._connection.execute(
+                """
+                UPDATE instances
+                SET lifecycle='RETIRED_FOR_RESTART', updated_at=?
+                WHERE instance_id=? AND binding_id=? AND lifecycle IN ('IDLE', 'EXITED')
+                  AND wrapper_pid=? AND wrapper_starttime=?
+                  AND applied_digest=?
+                """,
+                (
+                    time.time(),
+                    candidate.instance_id,
+                    candidate.binding_id,
+                    candidate.wrapper_pid,
+                    candidate.wrapper_starttime,
+                    candidate.applied_spec_digest,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("retirement candidate changed before commit")
 
     def pending_evidence_instances(self) -> tuple[PendingEvidenceInstance, ...]:
         rows = self._connection.execute(

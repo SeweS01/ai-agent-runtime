@@ -53,9 +53,11 @@ text, Telegram commands, picker screens, and output silence never become evidenc
 ## Current implementation milestone
 
 The executable launch skeleton, durable/idempotent local protocol, incremental and
-authoritative snapshot apply, explicit safe retirement, durable retrying outbox,
-SQLite state, fresh-read adapters, two-phase correlation, process-group supervision,
-and fail-closed policies are implemented and tested. CUS application-service wiring,
-observed-event policy handling, provider-qualified BUSY/IDLE evidence, retirement
-orchestration, and real Telegram/Codex E2E qualification remain gated work. This
-milestone is not a production release.
+authoritative snapshot apply, durable retrying outbox, SQLite state, fresh-read
+adapters, two-phase correlation, process-group supervision, qualified Codex rollout
+observation, and fail-closed policies are implemented and tested. The Runtime also
+contains exact-target retirement orchestration, but its configuration defaults to
+disabled and enabling it requires a qualification report identifier. Deterministic
+upstream retirement-race qualification, full CUS product/UI wiring, and real
+Telegram/Codex E2E qualification remain release blockers. This milestone is not a
+production release.

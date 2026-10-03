@@ -223,6 +223,19 @@ class RolloutObservationCursor:
 
 
 @dataclass(frozen=True, slots=True)
+class RetirementCandidate:
+    instance_id: str
+    binding_id: str
+    wrapper_pid: int
+    wrapper_starttime: int
+    tmux_session: str
+    tmux_pane: str
+    canonical_cwd: str
+    applied_spec_digest: str
+    desired_spec_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class RegisteredInstance:
     instance_id: str
     binding_id: str

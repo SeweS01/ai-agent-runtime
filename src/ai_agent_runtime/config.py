@@ -37,6 +37,8 @@ class RuntimeConfig:
     upstream_sha: str
     tmux_session_prefix: str = "cc-"
     allowed_project_roots: tuple[Path, ...] = ()
+    retirement_enabled: bool = False
+    retirement_qualification_report_id: str = ""
 
     @classmethod
     def defaults(cls) -> RuntimeConfig:
@@ -59,6 +61,8 @@ class RuntimeConfig:
             / "state.json",
             upstream_sha="",
             allowed_project_roots=(),
+            retirement_enabled=False,
+            retirement_qualification_report_id="",
         )
 
     @classmethod
@@ -73,6 +77,9 @@ class RuntimeConfig:
         raw_roots = policy.get("allowed_project_roots", [])
         if not isinstance(raw_roots, list) or not all(isinstance(item, str) for item in raw_roots):
             raise ValueError("policy.allowed_project_roots must be a list of paths")
+        retirement_enabled = policy.get("retirement_enabled", False)
+        if not isinstance(retirement_enabled, bool):
+            raise ValueError("policy.retirement_enabled must be a boolean")
         return cls(
             agent_instance_id=str(runtime.get("agent_instance_id", "")),
             forum_chat_id=int(runtime.get("forum_chat_id", 0)),
@@ -90,6 +97,10 @@ class RuntimeConfig:
             upstream_sha=str(telegram.get("upstream_sha", "")),
             tmux_session_prefix=str(telegram.get("tmux_session_prefix", "cc-")),
             allowed_project_roots=tuple(Path(item).expanduser() for item in raw_roots),
+            retirement_enabled=retirement_enabled,
+            retirement_qualification_report_id=str(
+                policy.get("retirement_qualification_report_id", "")
+            ),
         )
 
     def validate(self) -> None:
@@ -121,6 +132,10 @@ class RuntimeConfig:
             or any(ch not in "0123456789abcdef" for ch in self.real_codex_sha256[7:])
         ):
             raise ValueError("codex.sha256 must be a sha256-prefixed lowercase digest")
+        if self.retirement_enabled and not self.retirement_qualification_report_id:
+            raise ValueError(
+                "policy.retirement_qualification_report_id is required when retirement is enabled"
+            )
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:

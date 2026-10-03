@@ -8,6 +8,7 @@ import os
 import socket
 import stat
 import struct
+import subprocess
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
@@ -31,6 +32,7 @@ from ai_agent_runtime.ipc.protocol import read_frame, validate_version, versione
 from ai_agent_runtime.process_safety import (
     file_sha256,
     profile_fingerprint,
+    retire_tmux_session,
     validate_owned_executable,
     validate_profile_path,
     validate_project_path,
@@ -64,6 +66,7 @@ class RuntimeServer:
         phase_b_timeout: float = 45.0,
         identity_verifier: Callable[[WrapperIdentity], None] = verify_wrapper_identity,
         child_verifier: Callable[..., dict[str, object]] = verify_codex_child,
+        retirement_executor: Callable[[WrapperIdentity], None] = retire_tmux_session,
         evidence_interval: float = 1.0,
     ) -> None:
         self.config = config
@@ -72,6 +75,7 @@ class RuntimeServer:
         self.boot_id = str(uuid.uuid4())
         self.identity_verifier = identity_verifier
         self.child_verifier = child_verifier
+        self.retirement_executor = retirement_executor
         self.evidence_interval = evidence_interval
         self._results: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
 
@@ -85,6 +89,11 @@ class RuntimeServer:
         reconciler = asyncio.create_task(self._reconcile_topic_config_loop())
         evidence_collector = asyncio.create_task(self._collect_applied_evidence_loop())
         rollout_observer = asyncio.create_task(self._observe_codex_rollouts_loop())
+        retirement = (
+            asyncio.create_task(self._retire_pending_loop())
+            if self.config.retirement_enabled
+            else None
+        )
         notify("READY=1")
         try:
             async with server:
@@ -95,6 +104,8 @@ class RuntimeServer:
             reconciler.cancel()
             evidence_collector.cancel()
             rollout_observer.cancel()
+            if retirement is not None:
+                retirement.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watchdog
             with contextlib.suppress(asyncio.CancelledError):
@@ -103,6 +114,9 @@ class RuntimeServer:
                 await evidence_collector
             with contextlib.suppress(asyncio.CancelledError):
                 await rollout_observer
+            if retirement is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await retirement
             self.config.socket_path.unlink(missing_ok=True)
             self.store.close()
 
@@ -929,6 +943,46 @@ class RuntimeServer:
                 with contextlib.suppress(OSError, ValueError, RolloutContractError):
                     self._observe_codex_rollout(target)
             await asyncio.sleep(self.evidence_interval)
+
+    async def _retire_pending_loop(self) -> None:
+        while True:
+            await self._retire_pending_once()
+            await asyncio.sleep(self.evidence_interval)
+
+    async def _retire_pending_once(self) -> None:
+        for candidate in self.store.retirement_candidates():
+            binding = self.store.get_binding(candidate.binding_id)
+            if binding is None:
+                continue
+            try:
+                snapshot = read_topic_config(self.config.topic_config_path)
+                entry = snapshot.topic(binding.thread_id)
+                config_is_current = (
+                    entry is not None
+                    and entry.engine == "codex"
+                    and entry.exec_mode == "tmux"
+                    and entry.cwd is not None
+                    and Path(entry.cwd).resolve() == Path(binding.canonical_cwd).resolve()
+                    and binding.management_mode == ManagementMode.MANAGED
+                    and binding.config_digest == snapshot.digest
+                )
+            except (OSError, ValueError):
+                config_is_current = False
+            if not config_is_current:
+                continue
+            identity = WrapperIdentity(
+                pid=candidate.wrapper_pid,
+                starttime=candidate.wrapper_starttime,
+                uid=os.getuid(),
+                tmux_session=candidate.tmux_session,
+                tmux_pane=candidate.tmux_pane,
+                cwd=candidate.canonical_cwd,
+            )
+            try:
+                await asyncio.to_thread(self.retirement_executor, identity)
+                self.store.mark_instance_retired(candidate)
+            except (OSError, ValueError, RuntimeFailureError, subprocess.SubprocessError):
+                continue
 
     def _observe_codex_rollout(self, target: RolloutObservationTarget) -> None:
         cursor = self.store.rollout_observation_cursor(

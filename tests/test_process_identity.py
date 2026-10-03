@@ -8,6 +8,7 @@ from ai_agent_runtime.domain import WrapperIdentity
 from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 from ai_agent_runtime.process_safety import (
     TmuxPaneProcess,
+    retire_tmux_session,
     verify_codex_child,
     verify_wrapper_identity,
 )
@@ -70,6 +71,39 @@ def test_wrapper_identity_rejects_tmux_process_mismatch(
     with pytest.raises(RuntimeFailureError) as failure:
         verify_wrapper_identity(_identity())
     assert failure.value.code is ErrorCode.AMBIGUOUS
+
+
+def test_retirement_kills_exact_verified_tmux_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(process_safety, "verify_wrapper_identity", lambda _identity: None)
+    monkeypatch.setattr(
+        process_safety,
+        "proc_environment",
+        lambda _pid: {"TMUX": "/safe/tmux.sock,1,0"},
+    )
+    monkeypatch.setattr(
+        process_safety,
+        "_tmux_socket_from_environment",
+        lambda _value: Path("/safe/tmux.sock"),
+    )
+    monkeypatch.setattr(
+        process_safety,
+        "inspect_tmux_pane",
+        lambda _socket, _pane: TmuxPaneProcess("%7", "cc-n1001-42", os.getpid(), "$19"),
+    )
+
+    class Result:
+        returncode = 0
+
+    def fake_run(argv: tuple[str, ...], **_kwargs: object) -> Result:
+        calls.append(argv)
+        return Result()
+
+    monkeypatch.setattr(process_safety.subprocess, "run", fake_run)
+    retire_tmux_session(_identity())
+    assert calls == [("tmux", "-S", "/safe/tmux.sock", "kill-session", "-t", "$19")]
 
 
 def test_codex_child_evidence_checks_parent_environment_and_managed_args(
