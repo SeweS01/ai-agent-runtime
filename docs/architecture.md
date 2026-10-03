@@ -23,6 +23,14 @@ state.
 
 Both phases are required. Cwd alone is never an identity.
 
+The pinned upstream deliberately launches agents through `env -i`; arbitrary service
+environment variables are not inherited. Multi-AgentInstance deployments therefore
+use an instance-specific safe executable name such as
+`codex-wrapper@ta_prod_01`. The wrapper derives
+`~/.config/ai-agent-runtime/instances/ta_prod_01.toml` from that name. The generic
+`codex-wrapper` uses the single-instance `config.toml`. An environment override is a
+development/operator convenience, not the production namespace mechanism.
+
 ## State ownership
 
 - CUS owns authoritative desired generation/revision/digest.

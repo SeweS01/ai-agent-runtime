@@ -2,7 +2,16 @@ from pathlib import Path
 
 import pytest
 
-from ai_agent_runtime.wrapper.main import run
+from ai_agent_runtime.wrapper.main import _config_path, run
+
+
+def test_instance_specific_executable_selects_namespaced_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AI_AGENT_RUNTIME_CONFIG", raising=False)
+    assert _config_path("/safe/bin/codex-wrapper@ta_prod_02") == (
+        Path.home() / ".config" / "ai-agent-runtime" / "instances" / "ta_prod_02.toml"
+    )
 
 
 def test_agent_invocation_without_tmux_never_runs_real_codex(

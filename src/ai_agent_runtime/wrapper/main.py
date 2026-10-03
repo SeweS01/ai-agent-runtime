@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import ctypes
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from ai_agent_runtime.providers.codex.argv import (
 )
 
 _PR_SET_PDEATHSIG = 1
+_INSTANCE_EXECUTABLE = re.compile(r"^codex-wrapper@([A-Za-z0-9][A-Za-z0-9_.-]{0,63})$")
 _EXIT_BY_CODE = {
     ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS.value: 70,
     ErrorCode.RESUME_BINDING_MISMATCH.value: 71,
@@ -39,10 +41,16 @@ _EXIT_BY_CODE = {
 }
 
 
-def _config_path() -> Path:
+def _config_path(executable: str | None = None) -> Path:
     configured = os.environ.get("AI_AGENT_RUNTIME_CONFIG")
     if configured:
         return Path(configured).expanduser()
+    executable_name = Path(executable or sys.argv[0]).name
+    matched = _INSTANCE_EXECUTABLE.fullmatch(executable_name)
+    if matched:
+        return (
+            Path.home() / ".config" / "ai-agent-runtime" / "instances" / f"{matched.group(1)}.toml"
+        )
     return Path.home() / ".config" / "ai-agent-runtime" / "config.toml"
 
 

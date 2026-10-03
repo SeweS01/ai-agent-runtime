@@ -1,0 +1,15 @@
+{
+  "sanitized_environment": {
+    "runtime_config_not_allowlisted": true,
+    "uses_env_i": true
+  },
+  "state_order": {
+    "save_position": 5618,
+    "spawn_position": 4128
+  },
+  "tmux_name": {
+    "group_topic": "cc-n100123-44",
+    "private_default": "cc-123-0"
+  },
+  "upstream_sha": "0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b"
+}
