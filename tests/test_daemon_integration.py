@@ -55,7 +55,11 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         upstream_sha="0" * 40,
         allowed_project_roots=(tmp_path,),
     )
-    daemon = RuntimeServer(config, phase_b_timeout=1.0)
+    daemon = RuntimeServer(
+        config,
+        phase_b_timeout=1.0,
+        identity_verifier=lambda _identity: None,
+    )
     binding = RuntimeBinding(
         binding_id="binding-1",
         agent_instance_id="agent-1",
@@ -135,8 +139,9 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         ),
     )
     assert verified["ok"] is True
+    assert verified["applied"] is False
     assert verified["session_id"] == "session-1"
-    assert daemon.store.session_owner("session-1") == ("binding-1", "work")
+    assert daemon.store.session_owner("session-1") is None
 
     server_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -226,7 +231,7 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
         desired=desired_payload,
     )
 
-    daemon = RuntimeServer(config)
+    daemon = RuntimeServer(config, identity_verifier=lambda _identity: None)
     server_task = asyncio.create_task(daemon.serve())
     for _ in range(100):
         if config.socket_path.exists():
@@ -282,7 +287,7 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
     with contextlib.suppress(asyncio.CancelledError):
         await server_task
 
-    restarted = RuntimeServer(config)
+    restarted = RuntimeServer(config, identity_verifier=lambda _identity: None)
     restarted_task = asyncio.create_task(restarted.serve())
     for _ in range(100):
         if config.socket_path.exists():

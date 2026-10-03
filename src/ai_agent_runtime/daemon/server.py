@@ -9,6 +9,7 @@ import socket
 import struct
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from ai_agent_runtime.process_safety import (
     validate_owned_executable,
     validate_profile_path,
     validate_project_path,
+    verify_wrapper_identity,
 )
 from ai_agent_runtime.state.store import RuntimeStore
 from ai_agent_runtime.systemd_notify import notify, watchdog_loop
@@ -43,11 +45,18 @@ _PEERCRED = struct.Struct("3i")
 
 
 class RuntimeServer:
-    def __init__(self, config: RuntimeConfig, *, phase_b_timeout: float = 45.0) -> None:
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        *,
+        phase_b_timeout: float = 45.0,
+        identity_verifier: Callable[[WrapperIdentity], None] = verify_wrapper_identity,
+    ) -> None:
         self.config = config
         self.phase_b_timeout = phase_b_timeout
         self.store = RuntimeStore(config.database_path)
         self.boot_id = str(uuid.uuid4())
+        self.identity_verifier = identity_verifier
         self._results: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
 
     async def serve(self) -> None:
@@ -162,6 +171,7 @@ class RuntimeServer:
             raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance namespace mismatch")
         identity = _identity(payload)
         _verify_claimed_peer(identity, peer_pid=peer_pid, peer_uid=peer_uid)
+        self.identity_verifier(identity)
         config_snapshot = read_topic_config(self.config.topic_config_path)
         binding = phase_a_correlate(
             identity=identity,
@@ -379,6 +389,7 @@ class RuntimeServer:
             raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "binding disappeared")
         identity = _identity(payload)
         _verify_claimed_peer(identity, peer_pid=peer_pid, peer_uid=peer_uid)
+        self.identity_verifier(identity)
         child_pid = _required_int(payload, "child_pid")
         child_starttime = _required_int(payload, "child_starttime")
         deadline = asyncio.get_running_loop().time() + self.phase_b_timeout
@@ -412,15 +423,18 @@ class RuntimeServer:
             tmux_session=identity.tmux_session,
             tmux_pane=identity.tmux_pane,
             lifecycle=LifecycleState.IDLE,
-            applied_digest=spec.spec_digest,
+            # Phase B proves binding/process correlation, but a new Codex
+            # session's rollout identity is not necessarily durable yet.
+            # AppliedSpec remains unset until rollout evidence is collected.
+            applied_digest=None,
         )
-        if state.session_id:
-            self.store.record_session_provenance(
-                session_id=state.session_id,
-                binding_id=binding_id,
-                account_profile=spec.account_profile,
-            )
-        return self._ok(request_id, verified=True, session_id=state.session_id)
+        return self._ok(
+            request_id,
+            verified=True,
+            applied=False,
+            session_id=state.session_id,
+            expected_spec_digest=spec.spec_digest,
+        )
 
     async def _reconcile_topic_config_loop(self) -> None:
         while True:
