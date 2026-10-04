@@ -29,6 +29,7 @@ def test_pinned_upstream_retirement_fault_matrix_is_safe(tmp_path: Path) -> None
         "codex_version": "0.156.1",
         "codex_binary_sha256": f"sha256:{'1' * 64}",
         "runtime_release": "test-runtime",
+        "runtime_wheel_sha256": f"sha256:{'2' * 64}",
         "protocol_major": 1,
         "cus_connector_version": "test-connector",
     }

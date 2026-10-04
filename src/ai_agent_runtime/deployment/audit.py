@@ -326,6 +326,8 @@ def audit_deployment_manifest(
     tuple_data = tuple_value if isinstance(tuple_value, dict) else {}
     if tuple_data.get("runtime_release") != install_verification.get("release_id"):
         errors.append("runtime_release_tuple_mismatch")
+    if tuple_data.get("runtime_wheel_sha256") != install_verification.get("wheel_sha256"):
+        errors.append("runtime_wheel_tuple_mismatch")
     if tuple_data.get("protocol_major") != PROTOCOL_MAJOR:
         errors.append("protocol_major_tuple_mismatch")
     rollback_path = _absolute_file(manifest.get("rollback_manifest"), "rollback_manifest")

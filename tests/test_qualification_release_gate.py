@@ -24,6 +24,7 @@ def _release_tuple() -> dict[str, object]:
         "codex_version": "0.156.1",
         "codex_binary_sha256": f"sha256:{'1' * 64}",
         "runtime_release": "0.1.0",
+        "runtime_wheel_sha256": f"sha256:{'2' * 64}",
         "protocol_major": 1,
         "cus_connector_version": "runtime-v1",
     }

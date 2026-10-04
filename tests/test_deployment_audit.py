@@ -130,6 +130,7 @@ def _qualified() -> dict[str, object]:
             "codex_version": "0.156.1",
             "codex_binary_sha256": "placeholder",
             "runtime_release": "runtime-release",
+            "runtime_wheel_sha256": f"sha256:{hashlib.sha256(b'runtime-wheel').hexdigest()}",
             "protocol_major": 1,
             "cus_connector_version": "runtime-v1",
         },
@@ -379,3 +380,24 @@ def test_deployment_audit_binds_qualification_to_exact_installed_release(
 
     assert report["accepted"] is False
     assert "runtime_release_tuple_mismatch" in report["errors"]
+
+
+def test_deployment_audit_binds_qualification_to_exact_runtime_wheel(tmp_path: Path) -> None:
+    path = _manifest(tmp_path, [_instance(tmp_path)])
+
+    def other_runtime_wheel(qualification_path: Path) -> dict[str, object]:
+        result = _verifier_for(qualification_path)
+        release_tuple = result["release_tuple"]
+        assert isinstance(release_tuple, dict)
+        release_tuple["runtime_wheel_sha256"] = f"sha256:{'9' * 64}"
+        return result
+
+    report = audit_deployment_manifest(
+        path,
+        qualification_verifier=other_runtime_wheel,
+        rollback_verifier=_rollback_verified,
+        git_head_reader=lambda _path: "0" * 40,
+    )
+
+    assert report["accepted"] is False
+    assert "runtime_wheel_tuple_mismatch" in report["errors"]

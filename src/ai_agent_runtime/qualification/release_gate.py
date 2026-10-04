@@ -152,6 +152,7 @@ def validate_release_tuple(value: object) -> dict[str, object]:
         "codex_version",
         "codex_binary_sha256",
         "runtime_release",
+        "runtime_wheel_sha256",
         "protocol_major",
         "cus_connector_version",
     }
@@ -161,11 +162,14 @@ def validate_release_tuple(value: object) -> dict[str, object]:
         raise InventoryError(f"release_tuple fields mismatch: missing={missing}, extra={extra}")
     telegram_sha = _required_string(value["telegram_agent_sha"], "telegram_agent_sha")
     binary_sha = _required_string(value["codex_binary_sha256"], "codex_binary_sha256")
+    runtime_wheel_sha = _required_string(value["runtime_wheel_sha256"], "runtime_wheel_sha256")
     protocol_major = value["protocol_major"]
     if not _GIT_SHA_RE.fullmatch(telegram_sha):
         raise InventoryError("telegram_agent_sha must be an exact lowercase 40-hex commit")
     if not _SHA256_RE.fullmatch(binary_sha):
         raise InventoryError("codex_binary_sha256 must use sha256:<64 lowercase hex>")
+    if not _SHA256_RE.fullmatch(runtime_wheel_sha):
+        raise InventoryError("runtime_wheel_sha256 must use sha256:<64 lowercase hex>")
     if (
         not isinstance(protocol_major, int)
         or isinstance(protocol_major, bool)
@@ -177,6 +181,7 @@ def validate_release_tuple(value: object) -> dict[str, object]:
         "codex_version": _required_string(value["codex_version"], "codex_version"),
         "codex_binary_sha256": binary_sha,
         "runtime_release": _required_string(value["runtime_release"], "runtime_release"),
+        "runtime_wheel_sha256": runtime_wheel_sha,
         "protocol_major": protocol_major,
         "cus_connector_version": _required_string(
             value["cus_connector_version"], "cus_connector_version"
