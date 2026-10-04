@@ -140,3 +140,13 @@ Source profiles are not renamed, linked, modified, or removed. The resulting sta
 is `STAGED_NOT_ACTIVATED`: this command deliberately does not switch `CODEX_HOME`,
 create shared-session links, or claim lifecycle qualification. Activation topology
 remains a pinned-Codex qualification result, not an installer assumption.
+
+## Rollback preservation versus rollback qualification
+
+Create and verify the legacy rollback manifest described in `deployment.md` before
+cutover. That verification proves only that the exact legacy commit and selected
+non-secret rollback inputs remain available and unchanged. The separate
+`rollback_drill` qualification gate must still exercise restoration of session
+topology while preserving sessions created after staging, followed by the legacy
+end-to-end path. Neither the preservation manifest nor its verifier can emit a
+passing qualification evidence artifact on its own.

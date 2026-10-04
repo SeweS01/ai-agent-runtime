@@ -25,6 +25,10 @@ from ai_agent_runtime.migration.inventory import (
     write_inventory,
     write_json_artifact,
 )
+from ai_agent_runtime.migration.rollback import (
+    build_rollback_manifest,
+    verify_rollback_manifest,
+)
 from ai_agent_runtime.migration.session_storage import (
     build_session_storage_manifest,
     stage_session_storage,
@@ -177,6 +181,56 @@ def _storage_stage(*, manifest: str, output: str) -> int:
     return 0
 
 
+def _parse_artifacts(values: list[str]) -> dict[str, Path]:
+    artifacts: dict[str, Path] = {}
+    for value in values:
+        name, separator, raw_path = value.partition("=")
+        if not separator or not name or not raw_path or name in artifacts:
+            raise InventoryError("--artifact must be a unique NAME=/absolute/path pair")
+        artifacts[name] = Path(raw_path).expanduser()
+    return artifacts
+
+
+def _rollback_manifest(
+    *,
+    legacy_repo: str,
+    legacy_service: str,
+    legacy_codex_bin: str,
+    artifacts: list[str],
+    control_period_end: str,
+    output: str,
+) -> int:
+    manifest = build_rollback_manifest(
+        legacy_repo=Path(legacy_repo).expanduser(),
+        legacy_service=legacy_service,
+        legacy_codex_bin=Path(legacy_codex_bin).expanduser(),
+        artifacts=_parse_artifacts(artifacts),
+        control_period_end=control_period_end,
+    )
+    target = Path(output).expanduser()
+    write_json_artifact(target, manifest)
+    print(
+        json.dumps(
+            {
+                "output": str(target),
+                "manifest_digest": manifest["manifest_digest"],
+                "status": manifest["status"],
+                "cleanup_authorized": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _rollback_verify(*, manifest: str, output: str | None) -> int:
+    report = verify_rollback_manifest(Path(manifest).expanduser())
+    if output:
+        write_json_artifact(Path(output).expanduser(), report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["accepted"] else 1
+
+
 def _read_release_tuple(path: str) -> dict[str, object]:
     source = Path(path).expanduser()
     try:
@@ -263,6 +317,18 @@ def main() -> None:
     storage_stage = storage_commands.add_parser("stage")
     storage_stage.add_argument("--manifest", required=True)
     storage_stage.add_argument("--output", required=True)
+    rollback = commands.add_parser("rollback")
+    rollback_commands = rollback.add_subparsers(dest="rollback_command", required=True)
+    rollback_manifest = rollback_commands.add_parser("manifest")
+    rollback_manifest.add_argument("--legacy-repo", required=True)
+    rollback_manifest.add_argument("--legacy-service", required=True)
+    rollback_manifest.add_argument("--legacy-codex-bin", required=True)
+    rollback_manifest.add_argument("--artifact", action="append", default=[], required=True)
+    rollback_manifest.add_argument("--control-period-end", required=True)
+    rollback_manifest.add_argument("--output", required=True)
+    rollback_verify = rollback_commands.add_parser("verify")
+    rollback_verify.add_argument("--manifest", required=True)
+    rollback_verify.add_argument("--output")
     qualification = commands.add_parser("qualification")
     qualification_commands = qualification.add_subparsers(
         dest="qualification_command", required=True
@@ -317,6 +383,25 @@ def main() -> None:
                     output=namespace.output,
                 )
             )
+        if namespace.command == "rollback":
+            if namespace.rollback_command == "manifest":
+                raise SystemExit(
+                    _rollback_manifest(
+                        legacy_repo=namespace.legacy_repo,
+                        legacy_service=namespace.legacy_service,
+                        legacy_codex_bin=namespace.legacy_codex_bin,
+                        artifacts=namespace.artifact,
+                        control_period_end=namespace.control_period_end,
+                        output=namespace.output,
+                    )
+                )
+            if namespace.rollback_command == "verify":
+                raise SystemExit(
+                    _rollback_verify(
+                        manifest=namespace.manifest,
+                        output=namespace.output,
+                    )
+                )
         if namespace.command == "deployment" and namespace.deployment_command == "audit":
             raise SystemExit(
                 _deployment_audit(

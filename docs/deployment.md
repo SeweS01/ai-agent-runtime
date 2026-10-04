@@ -111,3 +111,38 @@ Session-storage candidates follow a separate manifest-and-stage workflow documen
 in `qualification.md`. Staging is copy-only and does not activate a topology; no
 deployment script may replace a non-empty profile directory with a symlink or delete
 the original data.
+
+## Preserve the legacy rollback path
+
+Before production cutover, pin the exact clean legacy checkout, the legacy wrapper
+binary, and every non-secret file needed to restore the old system. The command below
+only hashes and records existing inputs. It does not copy secrets, stop services,
+restore files, or authorize cleanup:
+
+```bash
+ai-agent-runtime rollback manifest \
+  --legacy-repo /srv/rollback/telegram-ai-agent-private \
+  --legacy-service telegram-ai-agent-private.service \
+  --legacy-codex-bin /srv/rollback/bin/legacy-codex-wrapper \
+  --artifact service-unit=/srv/rollback/systemd/telegram-ai-agent-private.service \
+  --artifact overlay-pth=/srv/rollback/python/00-cus-telegram-overlay.pth \
+  --artifact pre-cutover-inventory=/srv/qualification/pre-cutover.json \
+  --control-period-end 2026-11-04T00:00:00Z \
+  --output /srv/qualification/rollback-manifest.json
+
+ai-agent-runtime rollback verify \
+  --manifest /srv/qualification/rollback-manifest.json \
+  --output /srv/qualification/rollback-verification.json
+```
+
+The Git origin is stored only as a fingerprint because remote URLs can contain
+credentials. Secret-shaped paths, symlinks, dirty tracked worktrees, tampered files,
+and changed Git commits fail closed. `VERIFIED_NOT_DRILLED` means the inputs still
+exist unchanged; it is not rollback-drill evidence and does not authorize a restore.
+
+The private GitHub repository, local legacy checkout, overlay, old virtual
+environment, and server files remain protected rollback inputs until all of the
+following are true: the staging rollback drill passed, production completed its
+declared control period, the new session-storage topology no longer needs rollback,
+and the Owner made a separate cleanup decision. The manifest intentionally reports
+`cleanup_authorized=false`; deletion is never an automatic deployment step.
