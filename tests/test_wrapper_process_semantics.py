@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from ai_agent_runtime.wrapper import main as wrapper_main
 
 
@@ -38,6 +40,24 @@ def test_child_setup_closes_prctl_parent_death_race(monkeypatch) -> None:
     wrapper_main._child_setup(998)
 
     assert killed == [(1000, signal.SIGKILL)]
+
+
+def test_console_entrypoint_version_is_local_and_does_not_parse_or_load_config(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["codex-wrapper", "--version"])
+    monkeypatch.setattr(
+        wrapper_main.RuntimeConfig,
+        "load",
+        lambda *_args, **_kwargs: pytest.fail("--version must not load Runtime config"),
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        wrapper_main.main()
+
+    assert stopped.value.code == 0
+    assert capsys.readouterr().out.startswith("codex-wrapper ")
 
 
 def test_sigkill_wrapper_does_not_leave_running_child() -> None:

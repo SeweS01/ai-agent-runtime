@@ -44,7 +44,11 @@ ai-agent-runtime deployment install-release \
 
 An upgrade repeats this command with a new release ID. The result is
 `INSTALLED_NOT_ACTIVATED`; activation remains a separate audited deployment step, so
-rollback can continue to reference the prior directory.
+rollback can continue to reference the prior directory. The installer creates the
+venv at its final unique release path because Python entrypoint shebangs are not
+relocatable. A private `.installing` marker exists only while that new directory is
+being populated; failure removes that new directory, while success fsyncs it and
+removes the marker. Merely installing a directory never activates it.
 
 Capture the effective, secret-free deployment values in a digest-protected
 `ai-agent-runtime.deployment-manifest.v1` artifact. Each `--instance` file is a

@@ -28,13 +28,15 @@ def test_install_release_is_side_by_side_verified_and_not_activated(tmp_path: Pa
     marker = old_release / "preserve"
     marker.write_text("old", encoding="utf-8")
     commands: list[tuple[str, ...]] = []
+    venv_base_python = _executable(tmp_path / "base-python")
 
     def runner(command: Sequence[str]) -> None:
         normalized = tuple(command)
         commands.append(normalized)
         if normalized[1:3] == ("-m", "venv"):
             target = Path(normalized[-1])
-            _executable(target / "bin" / "python")
+            (target / "bin").mkdir(parents=True)
+            (target / "bin" / "python").symlink_to(venv_base_python)
             return
         environment = Path(normalized[0]).parent
         _executable(environment / "ai-agent-runtime")
@@ -62,7 +64,10 @@ def test_install_release_is_side_by_side_verified_and_not_activated(tmp_path: Pa
         {key: value for key, value in report.items() if key != "report_digest"}
     )
     assert len(commands) == 2
-    assert not list(releases.glob(".runtime-0.1.0-test.*"))
+    assert Path(commands[0][-1]) == release
+    assert commands[1][0] == str(release / "bin" / "python")
+    assert commands[1][0] != str(venv_base_python)
+    assert not (release / ".installing").exists()
 
 
 def test_install_release_rejects_digest_overwrite_and_cleans_failed_stage(

@@ -7,7 +7,6 @@ import re
 import shutil
 import stat
 import subprocess
-import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
@@ -77,10 +76,25 @@ def install_runtime_release(
     destination = root / release_id
     if destination.exists() or destination.is_symlink():
         raise InventoryError("refusing to overwrite an existing Runtime release")
-    temporary = Path(tempfile.mkdtemp(prefix=f".{release_id}.", dir=root))
     try:
-        runner((str(python_path), "-m", "venv", str(temporary)))
-        environment_python = validate_owned_executable(temporary / "bin" / "python")
+        destination.mkdir(mode=0o700)
+    except FileExistsError as exc:
+        raise InventoryError("refusing to overwrite an existing Runtime release") from exc
+    installing_marker = destination / ".installing"
+    marker_fd = os.open(installing_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(marker_fd)
+    try:
+        # A Python venv is not relocatable: generated entrypoints contain the
+        # absolute interpreter path. Build it at its final, newly-created path
+        # and use the marker to distinguish an incomplete release. Nothing is
+        # activated merely by appearing under the side-by-side releases root.
+        runner((str(python_path), "-m", "venv", str(destination)))
+        # venv deliberately creates ``bin/python`` as a symlink to the base
+        # interpreter. Validate the resolved target, but execute through the
+        # venv path so Python preserves sys.prefix and installs into this
+        # release instead of the PEP-668-protected system environment.
+        environment_python = destination / "bin" / "python"
+        validate_owned_executable(environment_python)
         runner(
             (
                 str(environment_python),
@@ -92,21 +106,22 @@ def install_runtime_release(
                 str(wheel_path),
             )
         )
-        runtime_executable = validate_owned_executable(temporary / "bin" / "ai-agent-runtime")
-        wrapper_executable = validate_owned_executable(temporary / "bin" / "codex-wrapper")
-        os.rename(temporary, destination)
+        runtime_executable = validate_owned_executable(destination / "bin" / "ai-agent-runtime")
+        wrapper_executable = validate_owned_executable(destination / "bin" / "codex-wrapper")
+        installing_marker.unlink()
+        release_fd = os.open(destination, os.O_RDONLY)
+        try:
+            os.fsync(release_fd)
+        finally:
+            os.close(release_fd)
         directory_fd = os.open(root, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
     except Exception:
-        if (
-            temporary.exists()
-            and temporary.parent == root
-            and temporary.name.startswith(f".{release_id}.")
-        ):
-            shutil.rmtree(temporary)
+        if destination.exists() and destination.parent == root and not destination.is_symlink():
+            shutil.rmtree(destination)
         raise
     report: dict[str, object] = {
         "schema": INSTALL_REPORT_SCHEMA,

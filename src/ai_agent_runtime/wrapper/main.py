@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import ctypes
@@ -321,8 +320,6 @@ def _run_supervised(
 
 def run(argv: list[str]) -> int:
     invocation = parse_invocation(argv)
-    config = RuntimeConfig.load(_config_path())
-    config.validate()
     if invocation.kind is InvocationKind.DENIED_ADMIN:
         _fail("DENIED_ADMIN", "credential and update commands are not exposed by wrapper")
     if invocation.kind is InvocationKind.SAFE_LOCAL:
@@ -331,6 +328,8 @@ def run(argv: list[str]) -> int:
         else:
             print("codex-wrapper: managed Codex launcher; agent sessions require tmux")
         return 0
+    config = RuntimeConfig.load(_config_path())
+    config.validate()
 
     pane = os.environ.get("TMUX_PANE")
     if not pane:
@@ -373,10 +372,10 @@ def run(argv: list[str]) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("args", nargs=argparse.REMAINDER)
-    namespace = parser.parse_args()
-    raise SystemExit(run(namespace.args))
+    # The wrapper must preserve the real Codex argv exactly. argparse would
+    # consume/reject flags such as ``--version`` before the formal Codex parser
+    # sees them, violating TELEGRAM_CODEX_BIN compatibility.
+    raise SystemExit(run(sys.argv[1:]))
 
 
 if __name__ == "__main__":
