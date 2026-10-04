@@ -1464,10 +1464,17 @@ class RuntimeStore:
                 }
                 for row in rows
             ]
-            active = [item for item in instances if item["lifecycle"] != "EXITED"]
+            live = [
+                item
+                for item in instances
+                if item["lifecycle"] not in {"EXITED", "RETIRED_FOR_RESTART"}
+            ]
+            retired = [
+                item for item in instances if item["lifecycle"] == "RETIRED_FOR_RESTART"
+            ]
             active_applied_digests = frozenset(
                 str(applied["spec_digest"])
-                for item in active
+                for item in live
                 if isinstance((applied := item.get("applied")), dict)
                 and isinstance(applied.get("spec_digest"), str)
             )
@@ -1479,14 +1486,21 @@ class RuntimeStore:
                 health = "OUT_OF_SYNC"
             elif binding.management_mode != ManagementMode.MANAGED:
                 health = binding.management_mode.value
-            elif any(item["heartbeat_stale"] is True for item in active) or any(
-                item["applied"] is None for item in active
+            elif any(item["heartbeat_stale"] is True for item in live) or any(
+                item["applied"] is None for item in live
             ):
                 health = "OUT_OF_SYNC"
             elif any(
                 isinstance(item["applied"], dict)
                 and item["applied"]["spec_digest"] != desired["spec_digest"]
-                for item in active
+                for item in live
+            ) or (
+                not live
+                and any(
+                    isinstance(item["applied"], dict)
+                    and item["applied"]["spec_digest"] != desired["spec_digest"]
+                    for item in retired
+                )
             ):
                 health = "PENDING_CHANGE"
             else:

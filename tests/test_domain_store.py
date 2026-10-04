@@ -284,7 +284,8 @@ def test_retirement_candidate_survives_late_child_exit_notification(tmp_path: Pa
         rollout_device=1,
         rollout_inode=2,
     )
-    store.put_effective_spec(_spec(2), codex_home=tmp_path, profile_fingerprint="fp")
+    next_spec = _spec(2)
+    store.put_effective_spec(next_spec, codex_home=tmp_path, profile_fingerprint="fp")
 
     store.record_instance(
         instance_id="instance-2",
@@ -324,6 +325,34 @@ def test_retirement_candidate_survives_late_child_exit_notification(tmp_path: Pa
     report = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
     assert report["health"] == "PENDING_CHANGE"  # type: ignore[index]
     assert report["instances"][0]["lifecycle"] == "RETIRED_FOR_RESTART"  # type: ignore[index]
+
+    store.record_instance(
+        instance_id="instance-3",
+        binding_id="binding-1",
+        wrapper_pid=300,
+        wrapper_starttime=30,
+        child_pid=301,
+        child_starttime=31,
+        tmux_session="cc-n1001-42-new",
+        tmux_pane="%3",
+        lifecycle="IDLE",
+        applied_digest=None,
+        heartbeat_at=time.time(),
+    )
+    store.record_applied_spec(
+        instance_id="instance-3",
+        binding_id="binding-1",
+        spec=next_spec,
+        evidence={"verified": True},
+        session_id="session-3",
+        account_profile="work",
+        rollout_path="/rollout-3",
+        rollout_device=3,
+        rollout_inode=4,
+    )
+
+    relaunched = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert relaunched["health"] == "RUNTIME_HEALTHY"  # type: ignore[index]
 
 
 def test_stale_live_instance_heartbeat_cannot_report_healthy(tmp_path: Path) -> None:
