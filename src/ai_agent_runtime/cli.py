@@ -45,6 +45,7 @@ from ai_agent_runtime.qualification.release_gate import (
     build_qualification_manifest,
     verify_qualification_manifest,
 )
+from ai_agent_runtime.qualification.run_plan import build_staging_run_plan
 from ai_agent_runtime.state.store import RuntimeStore
 
 
@@ -273,6 +274,48 @@ def _qualification_manifest(
     return 0
 
 
+def _qualification_plan(
+    *,
+    report_id: str,
+    release_tuple: str,
+    runtime_install_report: str,
+    upstream_checkout: str,
+    evidence_directory: str,
+    manifest_output: str,
+    report_output: str,
+    output: str,
+) -> int:
+    release_tuple_path = Path(release_tuple).expanduser()
+    plan = build_staging_run_plan(
+        report_id=report_id,
+        release_tuple=_read_release_tuple(release_tuple),
+        release_tuple_path=release_tuple_path,
+        runtime_install_report=Path(runtime_install_report),
+        upstream_checkout=Path(upstream_checkout),
+        evidence_directory=Path(evidence_directory),
+        qualification_manifest_output=Path(manifest_output),
+        qualification_report_output=Path(report_output),
+    )
+    target = Path(output).expanduser()
+    write_json_artifact(target, plan)
+    gates = plan["gates"]
+    if not isinstance(gates, list):
+        raise InventoryError("qualification plan gates are invalid")
+    print(
+        json.dumps(
+            {
+                "output": str(target),
+                "plan_digest": plan["plan_digest"],
+                "gate_count": len(gates),
+                "qualification_complete": False,
+                "production_cutover_authorized": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _qualification_verify(*, manifest: str, output: str | None) -> int:
     report = verify_qualification_manifest(Path(manifest))
     if output:
@@ -426,6 +469,15 @@ def main() -> None:
     qualification_commands = qualification.add_subparsers(
         dest="qualification_command", required=True
     )
+    qualification_plan = qualification_commands.add_parser("plan")
+    qualification_plan.add_argument("--report-id", required=True)
+    qualification_plan.add_argument("--release-tuple", required=True)
+    qualification_plan.add_argument("--runtime-install-report", required=True)
+    qualification_plan.add_argument("--upstream-checkout", required=True)
+    qualification_plan.add_argument("--evidence-directory", required=True)
+    qualification_plan.add_argument("--manifest-output", required=True)
+    qualification_plan.add_argument("--report-output", required=True)
+    qualification_plan.add_argument("--output", required=True)
     qualification_manifest = qualification_commands.add_parser("manifest")
     qualification_manifest.add_argument("--report-id", required=True)
     qualification_manifest.add_argument("--release-tuple", required=True)
@@ -468,6 +520,19 @@ def main() -> None:
         # Artifact-only commands intentionally work on an isolated staging host
         # without a live Runtime configuration or daemon.
         if namespace.command == "qualification":
+            if namespace.qualification_command == "plan":
+                raise SystemExit(
+                    _qualification_plan(
+                        report_id=namespace.report_id,
+                        release_tuple=namespace.release_tuple,
+                        runtime_install_report=namespace.runtime_install_report,
+                        upstream_checkout=namespace.upstream_checkout,
+                        evidence_directory=namespace.evidence_directory,
+                        manifest_output=namespace.manifest_output,
+                        report_output=namespace.report_output,
+                        output=namespace.output,
+                    )
+                )
             if namespace.qualification_command == "manifest":
                 raise SystemExit(
                     _qualification_manifest(

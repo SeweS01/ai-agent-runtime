@@ -79,6 +79,31 @@ default; `retirement_enabled = true` is invalid without a non-empty
 `retirement_qualification_report_id`. That identifier is an audit reference, not a
 substitute for the evidence required above.
 
+## Release-bound staging run plan
+
+Before starting any staging harness, generate one immutable run plan from the
+verified install report, exact release tuple and clean pinned upstream checkout. The
+evidence directory and both output parents must already exist, belong to the current
+Unix user and have mode `0700`:
+
+```bash
+ai-agent-runtime qualification plan \
+  --report-id staging-2026-10-04-001 \
+  --release-tuple /srv/qualification/release-tuple.json \
+  --runtime-install-report /srv/qualification/runtime-install-report.json \
+  --upstream-checkout /srv/telegram-ai-agent-upstream \
+  --evidence-directory /srv/qualification/evidence \
+  --manifest-output /srv/qualification/qualification-manifest.json \
+  --report-output /srv/qualification/qualification-report.json \
+  --output /srv/qualification/staging-run-plan.json
+```
+
+The plan enumerates every required gate and assertion, pins the two installed
+Runtime harness entrypoints, and supplies argv arrays for those harnesses and the
+final manifest/verify steps. The other gates remain explicitly
+`external_staging_required`; a plan never creates PASS evidence, starts services or
+authorizes production cutover.
+
 The source-level baseline checks are installed from the same digest-bound Runtime
 wheel as the daemon and wrapper. Run the installed release entrypoint against a
 clean upstream checkout:
