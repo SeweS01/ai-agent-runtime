@@ -4,7 +4,7 @@ After=local-fs.target
 
 [Service]
 Type=notify
-ExecStart=%h/.local/bin/ai-agent-runtime --config %h/.config/ai-agent-runtime/instances/%i.toml serve
+ExecStart=%h/.local/bin/ai-agent-runtime@%i --config %h/.config/ai-agent-runtime/instances/%i.toml serve
 Restart=always
 RestartSec=2s
 WatchdogSec=30s

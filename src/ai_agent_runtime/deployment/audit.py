@@ -10,6 +10,7 @@ from typing import Any, Final
 
 from ai_agent_runtime import __version__
 from ai_agent_runtime.config import RuntimeConfig
+from ai_agent_runtime.deployment.install import verify_runtime_install_report
 from ai_agent_runtime.errors import RuntimeFailureError
 from ai_agent_runtime.ipc.protocol import PROTOCOL_MAJOR
 from ai_agent_runtime.migration.inventory import InventoryError, _digest
@@ -43,6 +44,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 def build_deployment_manifest(
     *,
     target: str,
+    runtime_install_report: Path,
     qualification_manifest: Path,
     rollback_manifest: Path,
     agent_instances: list[dict[str, object]],
@@ -53,7 +55,9 @@ def build_deployment_manifest(
         raise InventoryError("deployment target must be staging or production")
     qualification_input = qualification_manifest.expanduser()
     rollback_input = rollback_manifest.expanduser()
+    install_input = runtime_install_report.expanduser()
     for path, field in (
+        (install_input, "runtime_install_report"),
         (qualification_input, "qualification_manifest"),
         (rollback_input, "rollback_manifest"),
     ):
@@ -71,6 +75,7 @@ def build_deployment_manifest(
     manifest: dict[str, object] = {
         "schema": DEPLOYMENT_MANIFEST_SCHEMA,
         "target": target,
+        "runtime_install_report": str(install_input.resolve(strict=True)),
         "qualification_manifest": str(qualification_path),
         "rollback_manifest": str(rollback_path),
         "agent_instances": normalized_instances,
@@ -112,6 +117,7 @@ def _check_service_properties(
     runtime_service: object,
     telegram_service: object,
     config_path: Path,
+    runtime_executable: Path,
     wrapper_path: Path,
 ) -> list[str]:
     errors: list[str] = []
@@ -129,6 +135,7 @@ def _check_service_properties(
         "socket_mode": "0600",
         "socket_accept": False,
         "config_path": str(config_path),
+        "exec_start": [str(runtime_executable), "--config", str(config_path), "serve"],
     }
     required_telegram: dict[str, object] = {
         "kill_mode": "process",
@@ -155,6 +162,7 @@ def _audit_instance(
     raw: object,
     *,
     tuple_data: dict[str, object],
+    install_verification: dict[str, object],
     git_head_reader: GitHeadReader,
 ) -> tuple[dict[str, object], list[str]]:
     if not isinstance(raw, dict):
@@ -173,6 +181,7 @@ def _audit_instance(
     ):
         errors.append(f"{instance_id}:bot_fingerprint_invalid")
     config_path = _absolute_file(raw.get("runtime_config"), "runtime_config")
+    runtime_executable = _absolute_file(raw.get("runtime_executable"), "runtime_executable")
     wrapper_path = _absolute_file(raw.get("wrapper_path"), "wrapper_path")
     checkout = _absolute_file(raw.get("telegram_checkout"), "telegram_checkout")
     try:
@@ -197,8 +206,18 @@ def _audit_instance(
     except (OSError, ValueError, RuntimeFailureError) as exc:
         errors.append(f"{instance_id}:real_codex_unsafe:{type(exc).__name__}")
     try:
+        validated_runtime = validate_owned_executable(runtime_executable)
+        installed_runtime = Path(str(install_verification.get("runtime_executable", "")))
+        if validated_runtime != installed_runtime.resolve(strict=True):
+            errors.append(f"{instance_id}:runtime_executable_install_mismatch")
+    except (OSError, ValueError, RuntimeFailureError) as exc:
+        errors.append(f"{instance_id}:runtime_executable_unsafe:{type(exc).__name__}")
+    try:
         validate_owned_executable(wrapper_path)
-    except (OSError, ValueError) as exc:
+        installed_wrapper = Path(str(install_verification.get("wrapper_executable", "")))
+        if wrapper_path.resolve(strict=True) != installed_wrapper.resolve(strict=True):
+            errors.append(f"{instance_id}:wrapper_install_mismatch")
+    except (OSError, ValueError, RuntimeFailureError) as exc:
         errors.append(f"{instance_id}:wrapper_unsafe:{type(exc).__name__}")
     if wrapper_path.name != f"codex-wrapper@{instance_id}":
         errors.append(f"{instance_id}:wrapper_name_mismatch")
@@ -216,6 +235,7 @@ def _audit_instance(
             runtime_service=raw.get("runtime_service"),
             telegram_service=raw.get("telegram_service"),
             config_path=config_path,
+            runtime_executable=runtime_executable,
             wrapper_path=wrapper_path,
         )
     )
@@ -225,6 +245,7 @@ def _audit_instance(
             "forum_chat_id": forum_chat_id,
             "telegram_bot_token_fingerprint": fingerprint,
             "runtime_config": str(config_path),
+            "runtime_executable": str(runtime_executable),
             "wrapper_path": str(wrapper_path),
             "telegram_checkout": str(checkout),
             "state_dir": str(config.state_dir),
@@ -255,6 +276,7 @@ def audit_deployment_manifest(
     expected_manifest_fields = {
         "schema",
         "target",
+        "runtime_install_report",
         "qualification_manifest",
         "rollback_manifest",
         "agent_instances",
@@ -272,6 +294,16 @@ def audit_deployment_manifest(
     target = manifest.get("target")
     if target not in {"staging", "production"}:
         errors.append("deployment_target_invalid")
+    install_report_path = _absolute_file(
+        manifest.get("runtime_install_report"), "runtime_install_report"
+    )
+    try:
+        install_verification = verify_runtime_install_report(install_report_path)
+    except (InventoryError, OSError, ValueError) as exc:
+        install_verification = {"accepted": False}
+        errors.append(f"runtime_install_report_unreadable:{type(exc).__name__}")
+    if install_verification.get("accepted") is not True:
+        errors.append("runtime_install_not_verified")
     try:
         qualification = qualification_verifier(qualification_path)
     except (InventoryError, OSError, ValueError) as exc:
@@ -313,6 +345,7 @@ def audit_deployment_manifest(
         instance, instance_errors = _audit_instance(
             raw,
             tuple_data=tuple_data,
+            install_verification=install_verification,
             git_head_reader=git_head_reader,
         )
         instances.append(instance)
@@ -342,6 +375,12 @@ def audit_deployment_manifest(
         "schema": DEPLOYMENT_AUDIT_SCHEMA,
         "manifest_path": str(manifest_path),
         "qualification_report_id": qualification.get("report_id"),
+        "runtime_install": {
+            "report_path": str(install_report_path),
+            "release_id": install_verification.get("release_id"),
+            "wheel_sha256": install_verification.get("wheel_sha256"),
+            "accepted": install_verification.get("accepted") is True,
+        },
         "release_tuple": tuple_data,
         "rollback": {
             "manifest_path": str(rollback_path),

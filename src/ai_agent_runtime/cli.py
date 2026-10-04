@@ -16,7 +16,10 @@ from ai_agent_runtime.deployment.audit import (
     audit_deployment_manifest,
     build_deployment_manifest,
 )
-from ai_agent_runtime.deployment.install import install_runtime_release
+from ai_agent_runtime.deployment.install import (
+    install_runtime_release,
+    verify_runtime_install_report,
+)
 from ai_agent_runtime.health.doctor import collect_doctor_report
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
@@ -288,6 +291,7 @@ def _deployment_audit(*, manifest: str, output: str | None) -> int:
 def _deployment_manifest(
     *,
     target: str,
+    runtime_install_report: str,
     qualification_manifest: str,
     rollback_manifest: str,
     instances: list[str],
@@ -296,6 +300,7 @@ def _deployment_manifest(
     descriptors = [_read_release_tuple(path) for path in instances]
     manifest = build_deployment_manifest(
         target=target,
+        runtime_install_report=Path(runtime_install_report),
         qualification_manifest=Path(qualification_manifest),
         rollback_manifest=Path(rollback_manifest),
         agent_instances=descriptors,
@@ -337,6 +342,14 @@ def _deployment_install_release(
     write_json_artifact(destination, report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
+
+
+def _deployment_verify_install(*, report: str, output: str | None) -> int:
+    verification = verify_runtime_install_report(Path(report))
+    if output:
+        write_json_artifact(Path(output).expanduser(), verification)
+    print(json.dumps(verification, indent=2, sort_keys=True))
+    return 0 if verification["accepted"] is True else 1
 
 
 def main() -> None:
@@ -403,6 +416,7 @@ def main() -> None:
     deployment_commands = deployment.add_subparsers(dest="deployment_command", required=True)
     deployment_manifest = deployment_commands.add_parser("manifest")
     deployment_manifest.add_argument("--target", choices=("staging", "production"), required=True)
+    deployment_manifest.add_argument("--runtime-install-report", required=True)
     deployment_manifest.add_argument("--qualification-manifest", required=True)
     deployment_manifest.add_argument("--rollback-manifest", required=True)
     deployment_manifest.add_argument("--instance", action="append", default=[], required=True)
@@ -414,6 +428,9 @@ def main() -> None:
     deployment_install.add_argument("--release-id", required=True)
     deployment_install.add_argument("--python", required=True)
     deployment_install.add_argument("--output", required=True)
+    deployment_verify_install = deployment_commands.add_parser("verify-install")
+    deployment_verify_install.add_argument("--report", required=True)
+    deployment_verify_install.add_argument("--output")
     deployment_audit = deployment_commands.add_parser("audit")
     deployment_audit.add_argument("--manifest", required=True)
     deployment_audit.add_argument("--output")
@@ -478,6 +495,7 @@ def main() -> None:
                 raise SystemExit(
                     _deployment_manifest(
                         target=namespace.target,
+                        runtime_install_report=namespace.runtime_install_report,
                         qualification_manifest=namespace.qualification_manifest,
                         rollback_manifest=namespace.rollback_manifest,
                         instances=namespace.instance,
@@ -492,6 +510,13 @@ def main() -> None:
                         releases_root=namespace.releases_root,
                         release_id=namespace.release_id,
                         python=namespace.python,
+                        output=namespace.output,
+                    )
+                )
+            if namespace.deployment_command == "verify-install":
+                raise SystemExit(
+                    _deployment_verify_install(
+                        report=namespace.report,
                         output=namespace.output,
                     )
                 )

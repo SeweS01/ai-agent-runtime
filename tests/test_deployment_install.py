@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from ai_agent_runtime.deployment.install import install_runtime_release
-from ai_agent_runtime.migration.inventory import InventoryError, _digest
+from ai_agent_runtime.deployment.install import (
+    install_runtime_release,
+    verify_runtime_install_report,
+)
+from ai_agent_runtime.migration.inventory import InventoryError, _digest, write_json_artifact
 
 
 def _executable(path: Path, content: bytes = b"#!/bin/sh\nexit 0\n") -> Path:
@@ -68,6 +71,18 @@ def test_install_release_is_side_by_side_verified_and_not_activated(tmp_path: Pa
     assert commands[1][0] == str(release / "bin" / "python")
     assert commands[1][0] != str(venv_base_python)
     assert not (release / ".installing").exists()
+
+    report_path = tmp_path / "install-report.json"
+    write_json_artifact(report_path, report)
+    verified = verify_runtime_install_report(report_path)
+    assert verified["accepted"] is True
+    assert verified["status"] == "VERIFIED_NOT_ACTIVATED"
+    assert verified["mutations_performed"] is False
+
+    wheel.write_bytes(b"wheel-content-tampered")
+    blocked = verify_runtime_install_report(report_path)
+    assert blocked["accepted"] is False
+    assert "install_report_wheel_mismatch" in blocked["errors"]
 
 
 def test_install_release_rejects_digest_overwrite_and_cleans_failed_stage(

@@ -11,6 +11,7 @@ from ai_agent_runtime.deployment.audit import (
     audit_deployment_manifest,
     build_deployment_manifest,
 )
+from ai_agent_runtime.deployment.install import INSTALL_REPORT_SCHEMA
 from ai_agent_runtime.migration.inventory import InventoryError, _digest, write_json_artifact
 
 
@@ -21,13 +22,44 @@ def _executable(path: Path, content: bytes) -> str:
     return f"sha256:{hashlib.sha256(content).hexdigest()}"
 
 
+def _install_report(tmp_path: Path) -> tuple[Path, Path, Path]:
+    report_path = tmp_path / "runtime-install.json"
+    release = tmp_path / "runtime-release"
+    runtime = release / "bin" / "ai-agent-runtime"
+    wrapper = release / "bin" / "codex-wrapper"
+    wheel = tmp_path / "runtime.whl"
+    if not report_path.exists():
+        _executable(runtime, b"#!/bin/sh\nexit 0\n")
+        _executable(wrapper, b"#!/bin/sh\nexit 0\n")
+        wheel.write_bytes(b"runtime-wheel")
+        report: dict[str, object] = {
+            "schema": INSTALL_REPORT_SCHEMA,
+            "status": "INSTALLED_NOT_ACTIVATED",
+            "release_id": release.name,
+            "release_path": str(release),
+            "wheel_path": str(wheel),
+            "wheel_sha256": f"sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}",
+            "python_path": "/usr/bin/python3.12",
+            "runtime_executable": str(runtime),
+            "wrapper_executable": str(wrapper),
+            "existing_releases_preserved": True,
+            "activation_performed": False,
+            "services_restarted": False,
+            "production_cutover_authorized": False,
+        }
+        report["report_digest"] = _digest(report)
+        write_json_artifact(report_path, report)
+    return report_path, runtime, wrapper
+
+
 def _instance(tmp_path: Path, *, instance_id: str = "agent-1", chat_id: int = -1001) -> dict:
     root = tmp_path / instance_id
     root.mkdir()
+    _report, runtime, installed_wrapper = _install_report(tmp_path)
     codex = root / "codex-real"
     codex_digest = _executable(codex, b"#!/bin/sh\nexit 0\n")
     wrapper = root / f"codex-wrapper@{instance_id}"
-    _executable(wrapper, b"#!/bin/sh\nexit 1\n")
+    wrapper.symlink_to(installed_wrapper)
     checkout = root / "telegram"
     checkout.mkdir()
     config = root / "runtime.toml"
@@ -65,6 +97,7 @@ retirement_qualification_report_id = ""
         "forum_chat_id": chat_id,
         "telegram_bot_token_fingerprint": f"sha256:{'1' * 64}",
         "runtime_config": str(config),
+        "runtime_executable": str(runtime),
         "wrapper_path": str(wrapper),
         "telegram_checkout": str(checkout),
         "runtime_service": {
@@ -78,6 +111,7 @@ retirement_qualification_report_id = ""
             "socket_mode": "0600",
             "socket_accept": False,
             "config_path": str(config),
+            "exec_start": [str(runtime), "--config", str(config), "serve"],
         },
         "telegram_service": {
             "unit_name": f"telegram-ai-agent@{instance_id}.service",
@@ -113,9 +147,11 @@ def _manifest(
     qualification.write_text("{}\n", encoding="utf-8")
     rollback = tmp_path / "rollback.json"
     rollback.write_text("{}\n", encoding="utf-8")
+    install_report, _runtime, _wrapper = _install_report(tmp_path)
     material: dict[str, object] = {
         "schema": DEPLOYMENT_MANIFEST_SCHEMA,
         "target": target,
+        "runtime_install_report": str(install_report),
         "qualification_manifest": str(qualification),
         "rollback_manifest": str(rollback),
         "agent_instances": instances,
@@ -131,10 +167,12 @@ def test_deployment_manifest_builder_pins_exact_inputs_without_mutation(tmp_path
     qualification.write_text("{}\n", encoding="utf-8")
     rollback = tmp_path / "rollback.json"
     rollback.write_text("{}\n", encoding="utf-8")
+    install_report, _runtime, _wrapper = _install_report(tmp_path)
     instance = _instance(tmp_path)
 
     manifest = build_deployment_manifest(
         target="staging",
+        runtime_install_report=install_report,
         qualification_manifest=qualification,
         rollback_manifest=rollback,
         agent_instances=[instance],
@@ -142,6 +180,7 @@ def test_deployment_manifest_builder_pins_exact_inputs_without_mutation(tmp_path
 
     assert manifest["schema"] == DEPLOYMENT_MANIFEST_SCHEMA
     assert manifest["target"] == "staging"
+    assert manifest["runtime_install_report"] == str(install_report.resolve())
     assert manifest["qualification_manifest"] == str(qualification.resolve())
     assert manifest["rollback_manifest"] == str(rollback.resolve())
     assert manifest["agent_instances"] == [instance]
@@ -156,12 +195,14 @@ def test_deployment_manifest_builder_rejects_unsafe_inputs(tmp_path: Path) -> No
     qualification.write_text("{}\n", encoding="utf-8")
     rollback = tmp_path / "rollback.json"
     rollback.write_text("{}\n", encoding="utf-8")
+    install_report, _runtime, _wrapper = _install_report(tmp_path)
     qualification_link = tmp_path / "qualification-link.json"
     qualification_link.symlink_to(qualification)
 
     with pytest.raises(InventoryError, match="target"):
         build_deployment_manifest(
             target="preview",
+            runtime_install_report=install_report,
             qualification_manifest=qualification,
             rollback_manifest=rollback,
             agent_instances=[_instance(tmp_path)],
@@ -169,6 +210,7 @@ def test_deployment_manifest_builder_rejects_unsafe_inputs(tmp_path: Path) -> No
     with pytest.raises(InventoryError, match="non-symlink"):
         build_deployment_manifest(
             target="staging",
+            runtime_install_report=install_report,
             qualification_manifest=qualification_link,
             rollback_manifest=rollback,
             agent_instances=[{}],
@@ -176,6 +218,7 @@ def test_deployment_manifest_builder_rejects_unsafe_inputs(tmp_path: Path) -> No
     with pytest.raises(InventoryError, match="AgentInstance"):
         build_deployment_manifest(
             target="staging",
+            runtime_install_report=install_report,
             qualification_manifest=qualification,
             rollback_manifest=rollback,
             agent_instances=[],

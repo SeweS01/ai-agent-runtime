@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -11,10 +12,13 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
+from ai_agent_runtime.errors import RuntimeFailureError
 from ai_agent_runtime.migration.inventory import InventoryError, _digest
 from ai_agent_runtime.process_safety import file_sha256, validate_owned_executable
 
 INSTALL_REPORT_SCHEMA: Final = "ai-agent-runtime.install-report.v1"
+INSTALL_VERIFICATION_SCHEMA: Final = "ai-agent-runtime.install-verification.v1"
+_MAX_REPORT_BYTES: Final = 1024 * 1024
 _RELEASE_ID_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 CommandRunner = Callable[[Sequence[str]], None]
 
@@ -140,3 +144,92 @@ def install_runtime_release(
     }
     report["report_digest"] = _digest(report)
     return report
+
+
+def verify_runtime_install_report(path: Path) -> dict[str, object]:
+    """Re-hash a completed side-by-side install without changing it."""
+
+    source = path.expanduser()
+    if source.is_symlink() or not source.is_file():
+        raise InventoryError("Runtime install report must be a regular non-symlink file")
+    if not 0 < source.stat().st_size <= _MAX_REPORT_BYTES:
+        raise InventoryError("Runtime install report has unsafe size")
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise InventoryError("Runtime install report is not valid JSON") from exc
+    if not isinstance(raw, dict):
+        raise InventoryError("Runtime install report must be an object")
+    expected_fields = {
+        "schema",
+        "status",
+        "release_id",
+        "release_path",
+        "wheel_path",
+        "wheel_sha256",
+        "python_path",
+        "runtime_executable",
+        "wrapper_executable",
+        "existing_releases_preserved",
+        "activation_performed",
+        "services_restarted",
+        "production_cutover_authorized",
+        "report_digest",
+    }
+    errors: list[str] = []
+    if set(raw) != expected_fields:
+        errors.append("install_report_fields_mismatch")
+    if raw.get("schema") != INSTALL_REPORT_SCHEMA:
+        errors.append("install_report_schema_mismatch")
+    if raw.get("report_digest") != _digest(
+        {key: value for key, value in raw.items() if key != "report_digest"}
+    ):
+        errors.append("install_report_digest_mismatch")
+    if raw.get("status") != "INSTALLED_NOT_ACTIVATED":
+        errors.append("install_report_status_invalid")
+    for field, expected in {
+        "existing_releases_preserved": True,
+        "activation_performed": False,
+        "services_restarted": False,
+        "production_cutover_authorized": False,
+    }.items():
+        if raw.get(field) is not expected:
+            errors.append(f"install_report_{field}_invalid")
+    try:
+        wheel = Path(str(raw["wheel_path"]))
+        wheel_digest = str(raw["wheel_sha256"])
+        if wheel.is_symlink() or not wheel.is_file() or file_sha256(wheel) != wheel_digest:
+            errors.append("install_report_wheel_mismatch")
+    except (KeyError, OSError, RuntimeFailureError):
+        errors.append("install_report_wheel_invalid")
+    try:
+        release = Path(str(raw["release_path"]))
+        release_id = str(raw["release_id"])
+        if (
+            release.is_symlink()
+            or not release.is_dir()
+            or release.name != release_id
+            or (release / ".installing").exists()
+        ):
+            errors.append("install_report_release_invalid")
+        runtime = validate_owned_executable(Path(str(raw["runtime_executable"])))
+        wrapper = validate_owned_executable(Path(str(raw["wrapper_executable"])))
+        if runtime.parent.parent != release or wrapper.parent.parent != release:
+            errors.append("install_report_executable_path_mismatch")
+    except (KeyError, OSError, RuntimeFailureError):
+        errors.append("install_report_executable_invalid")
+    verification: dict[str, object] = {
+        "schema": INSTALL_VERIFICATION_SCHEMA,
+        "accepted": not errors,
+        "status": "VERIFIED_NOT_ACTIVATED" if not errors else "BLOCKED",
+        "install_report": str(source.resolve(strict=True)),
+        "release_id": raw.get("release_id"),
+        "release_path": raw.get("release_path"),
+        "runtime_executable": raw.get("runtime_executable"),
+        "wrapper_executable": raw.get("wrapper_executable"),
+        "wheel_sha256": raw.get("wheel_sha256"),
+        "errors": errors,
+        "mutations_performed": False,
+    }
+    verification["verification_digest"] = _digest(verification)
+    return verification

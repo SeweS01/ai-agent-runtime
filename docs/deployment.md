@@ -8,6 +8,7 @@ For an AgentInstance named `ta_prod_01`:
 - Runtime config:
   `~/.config/ai-agent-runtime/instances/ta_prod_01.toml`;
 - Runtime service: `ai-agent-runtime@ta_prod_01.service`;
+- Runtime executable name: `~/.local/bin/ai-agent-runtime@ta_prod_01`;
 - socket: `/run/user/$UID/ai-agent-runtime/ta_prod_01/runtime.sock`;
 - wrapper executable name: `~/.local/bin/codex-wrapper@ta_prod_01`;
 - Telegram Agent `TELEGRAM_CODEX_BIN` points to that instance-specific executable;
@@ -40,6 +41,10 @@ ai-agent-runtime deployment install-release \
   --release-id runtime-0.1.0-<git-sha> \
   --python /usr/bin/python3.12 \
   --output /srv/qualification/runtime-install-report.json
+
+ai-agent-runtime deployment verify-install \
+  --report /srv/qualification/runtime-install-report.json \
+  --output /srv/qualification/runtime-install-verification.json
 ```
 
 An upgrade repeats this command with a new release ID. The result is
@@ -58,6 +63,7 @@ Build and audit the artifact before staging:
 ```bash
 ai-agent-runtime deployment manifest \
   --target staging \
+  --runtime-install-report /srv/qualification/runtime-install-report.json \
   --qualification-manifest /srv/qualification/qualification-manifest.json \
   --rollback-manifest /srv/qualification/rollback-manifest.json \
   --instance /srv/qualification/instances/ta_staging_01.json \
@@ -69,7 +75,12 @@ ai-agent-runtime deployment audit \
 ```
 
 The deployment manifest has an explicit `target` (`staging` or `production`) and
-pins both `qualification_manifest` and `rollback_manifest`. For `staging`, the
+pins the verified wheel/install report, `qualification_manifest`, and
+`rollback_manifest`. Each AgentInstance descriptor includes the exact
+`runtime_executable`; its captured Runtime service must expose `exec_start` as the
+four-item argv list `[runtime_executable, "--config", config_path, "serve"]`. The
+auditor resolves both instance-named Runtime/wrapper paths back to the executables in
+that install report, so a different or incomplete release cannot pass. For `staging`, the
 qualification manifest must be structurally valid and bound to the exact tuple, but
 its only permitted errors are missing evidence gates: those are the tests staging is
 being created to run. Existing invalid/tampered evidence still blocks deployment.
