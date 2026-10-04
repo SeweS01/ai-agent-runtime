@@ -1,3 +1,4 @@
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -208,6 +209,7 @@ def test_status_distinguishes_unverified_pending_and_exited_instances(tmp_path: 
         tmux_pane="%1",
         lifecycle="IDLE",
         applied_digest=None,
+        heartbeat_at=time.time(),
     )
     report = store.status_report("agent-1")
     assert report["bindings"][0]["health"] == "OUT_OF_SYNC"  # type: ignore[index]
@@ -269,6 +271,7 @@ def test_retirement_candidate_survives_late_child_exit_notification(tmp_path: Pa
         tmux_pane="%1",
         lifecycle="IDLE",
         applied_digest=None,
+        heartbeat_at=time.time(),
     )
     store.record_applied_spec(
         instance_id="instance-1",
@@ -294,6 +297,7 @@ def test_retirement_candidate_survives_late_child_exit_notification(tmp_path: Pa
         tmux_pane="%2",
         lifecycle="IDLE",
         applied_digest=None,
+        heartbeat_at=time.time(),
     )
     assert store.retirement_candidates() == ()
     store.mark_instance_exited(
@@ -320,3 +324,47 @@ def test_retirement_candidate_survives_late_child_exit_notification(tmp_path: Pa
     report = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
     assert report["health"] == "PENDING_CHANGE"  # type: ignore[index]
     assert report["instances"][0]["lifecycle"] == "RETIRED_FOR_RESTART"  # type: ignore[index]
+
+
+def test_stale_live_instance_heartbeat_cannot_report_healthy(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path / "runtime.sqlite")
+    binding = RuntimeBinding(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        chat_id=-1001,
+        thread_id=42,
+        project_id="project-1",
+        canonical_cwd="/srv/project",
+        expected_tmux_session="cc-n1001-42",
+    )
+    store.upsert_binding(binding)
+    spec = _spec()
+    store.put_effective_spec(spec, codex_home=tmp_path, profile_fingerprint="fp")
+    store.record_instance(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        wrapper_pid=100,
+        wrapper_starttime=10,
+        child_pid=101,
+        child_starttime=11,
+        tmux_session="cc-n1001-42",
+        tmux_pane="%1",
+        lifecycle="IDLE",
+        applied_digest=None,
+        heartbeat_at=time.time() - 11,
+    )
+    store.record_applied_spec(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        spec=spec,
+        evidence={"verified": True},
+        session_id="session-1",
+        account_profile="work",
+        rollout_path="/rollout",
+        rollout_device=1,
+        rollout_inode=2,
+    )
+
+    instance = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert instance["health"] == "OUT_OF_SYNC"  # type: ignore[index]
+    assert instance["instances"][0]["heartbeat_stale"] is True  # type: ignore[index]

@@ -140,6 +140,8 @@ CREATE TABLE IF NOT EXISTS codex_rollout_observers (
 );
 """
 
+_INSTANCE_HEARTBEAT_STALE_SECONDS = 10.0
+
 
 class RuntimeStore:
     def __init__(self, path: Path) -> None:
@@ -1245,6 +1247,7 @@ class RuntimeStore:
         return None if row is None else float(row["last_seen_at"])
 
     def status_report(self, agent_instance_id: str) -> dict[str, object]:
+        observed_at = time.time()
         reports: list[dict[str, object]] = []
         for binding in self.list_bindings(agent_instance_id):
             effective = self.get_effective_spec(binding.binding_id)
@@ -1285,6 +1288,14 @@ class RuntimeStore:
                     "daemon_boot_id": row["daemon_boot_id"],
                     "connection_generation": row["connection_generation"],
                     "last_heartbeat_at": row["last_heartbeat_at"],
+                    "heartbeat_stale": (
+                        row["lifecycle"] in {"PROVISIONAL_STARTING", "IDLE", "BUSY"}
+                        and (
+                            row["last_heartbeat_at"] is None
+                            or observed_at - float(row["last_heartbeat_at"])
+                            > _INSTANCE_HEARTBEAT_STALE_SECONDS
+                        )
+                    ),
                     "applied": (
                         {
                             "generation_id": row["applied_generation"],
@@ -1303,7 +1314,9 @@ class RuntimeStore:
                 health = "OUT_OF_SYNC"
             elif binding.management_mode != ManagementMode.MANAGED:
                 health = binding.management_mode.value
-            elif any(item["applied"] is None for item in active):
+            elif any(item["heartbeat_stale"] is True for item in active) or any(
+                item["applied"] is None for item in active
+            ):
                 health = "OUT_OF_SYNC"
             elif any(
                 isinstance(item["applied"], dict)

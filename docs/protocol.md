@@ -85,7 +85,9 @@ desired profile/model/reasoning and revision, exact wrapper/child/tmux identitie
 verified applied revision, lifecycle, and derived health. It never returns credential
 content or transcript text. A binding that would otherwise be `RUNTIME_HEALTHY` is
 reported as `DEGRADED_CUS_SYNC` while the control-plane lease is stale; stronger
-binding errors and pending states retain precedence.
+binding errors and pending states retain precedence. A nominally live instance whose
+wrapper heartbeat is absent or older than the bounded ten-second liveness window is
+`OUT_OF_SYNC`; stale durable process state can never remain `RUNTIME_HEALTHY`.
 
 ## Durable outbox
 
