@@ -533,22 +533,33 @@ class RuntimeServer:
         unmanaged_present = "unmanaged_bindings" in payload
         raw_unmanaged = payload.get("unmanaged_bindings", [])
         raw_retired = payload.get("retired_binding_ids", [])
+        relocations_present = "project_relocations" in payload
+        raw_relocations = payload.get("project_relocations", [])
         if (
             not isinstance(raw_items, list)
             or not isinstance(raw_unmanaged, list)
             or not isinstance(raw_retired, list)
+            or not isinstance(raw_relocations, list)
         ):
             raise RuntimeFailureError(
                 ErrorCode.INVALID_REQUEST,
-                "bindings, unmanaged_bindings and retired_binding_ids must be arrays",
+                "snapshot binding, retirement and relocation fields must be arrays",
             )
-        if len(raw_items) + len(raw_unmanaged) > 1000 or len(raw_retired) > 1000:
+        if (
+            len(raw_items) + len(raw_unmanaged) > 1000
+            or len(raw_retired) > 1000
+            or len(raw_relocations) > 1000
+        ):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "snapshot is too large")
         if any(not isinstance(value, str) or not value for value in raw_retired):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "invalid retired binding id")
         retired = frozenset(raw_retired)
         if len(retired) != len(raw_retired):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "duplicate retired binding id")
+        relocations = self._validate_project_relocations(raw_relocations)
+        relocations_by_project = {
+            str(relocation["project_id"]): relocation for relocation in relocations
+        }
         normalized_items: list[dict[str, Any]] = []
         normalized_unmanaged: list[dict[str, Any]] = []
         prepared: list[tuple[RuntimeBinding, DesiredSpec, Path, str]] = []
@@ -569,6 +580,7 @@ class RuntimeServer:
                 raw_binding,
                 raw_desired,
                 generation_id=generation_id,
+                relocations_by_project=relocations_by_project,
             )
             if binding.thread_id in managed_topics:
                 raise RuntimeFailureError(
@@ -603,6 +615,7 @@ class RuntimeServer:
                 raw_binding,
                 raw_desired,
                 generation_id=generation_id,
+                relocations_by_project=relocations_by_project,
             )
             if binding.binding_id in binding_ids or binding.expected_tmux_session in tmux_sessions:
                 raise RuntimeFailureError(
@@ -636,6 +649,23 @@ class RuntimeServer:
             )
             normalized_unmanaged.append({"binding": raw_binding, "desired": raw_desired})
 
+        prepared_by_id = {
+            binding.binding_id: (binding, spec) for binding, spec, _home, _fingerprint in prepared
+        }
+        for relocation in relocations:
+            relocation_binding_ids = relocation["binding_ids"]
+            assert isinstance(relocation_binding_ids, list)
+            new_cwd = str(relocation["new_canonical_cwd"])
+            for binding_id in relocation_binding_ids:
+                relocated = prepared_by_id.get(binding_id)
+                if relocated is None or (
+                    relocated[0].canonical_cwd != new_cwd or relocated[1].canonical_cwd != new_cwd
+                ):
+                    raise RuntimeFailureError(
+                        ErrorCode.INVALID_REQUEST,
+                        "project relocation snapshot does not apply the new path",
+                    )
+
         digest_material = {
             "agent_instance_id": agent_instance_id,
             "generation_id": generation_id,
@@ -649,6 +679,11 @@ class RuntimeServer:
             digest_material["unmanaged_bindings"] = sorted(
                 normalized_unmanaged,
                 key=lambda item: str(item["binding"].get("binding_id", "")),
+            )
+        if relocations_present:
+            digest_material["project_relocations"] = sorted(
+                relocations,
+                key=lambda item: str(item["relocation_id"]),
             )
         if snapshot_digest != sha256_digest(digest_material):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "snapshot digest mismatch")
@@ -767,6 +802,7 @@ class RuntimeServer:
                 snapshot_digest=snapshot_digest,
                 updates=finalized,
                 retired_binding_ids=retired,
+                project_relocations=tuple(relocations),
             )
         except ValueError as exc:
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
@@ -788,7 +824,139 @@ class RuntimeServer:
             ),
             retired_bindings=sorted(retired),
             config_digest=snapshot.digest,
+            project_relocations=sorted(
+                str(relocation["relocation_id"]) for relocation in relocations
+            ),
         )
+
+    def _validate_project_relocations(
+        self,
+        raw_relocations: list[Any],
+    ) -> list[dict[str, object]]:
+        known_bindings = self.store.list_bindings(self.config.agent_instance_id)
+        relocations: list[dict[str, object]] = []
+        relocation_ids: set[str] = set()
+        project_ids: set[str] = set()
+        for raw in raw_relocations:
+            if not isinstance(raw, dict):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation must be an object",
+                )
+            if set(raw) != {
+                "relocation_id",
+                "agent_instance_id",
+                "project_id",
+                "old_canonical_cwd",
+                "new_canonical_cwd",
+                "binding_ids",
+            }:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation fields mismatch",
+                )
+            relocation_id = _required_str(raw, "relocation_id")
+            agent_instance_id = _required_str(raw, "agent_instance_id")
+            project_id = _required_str(raw, "project_id")
+            old_cwd = _required_str(raw, "old_canonical_cwd")
+            old_path = Path(old_cwd)
+            if not old_path.is_absolute() or ".." in old_path.parts or old_path == Path("/"):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation old path is unsafe",
+                )
+            new_path = validate_project_path(
+                Path(_required_str(raw, "new_canonical_cwd")),
+                allowed_roots=self.config.allowed_project_roots,
+            )
+            if agent_instance_id != self.config.agent_instance_id:
+                raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance mismatch")
+            if str(new_path) == old_cwd:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation must change the canonical path",
+                )
+            raw_binding_ids = raw.get("binding_ids")
+            if (
+                not isinstance(raw_binding_ids, list)
+                or not raw_binding_ids
+                or any(not isinstance(value, str) or not value for value in raw_binding_ids)
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation requires binding ids",
+                )
+            binding_ids = frozenset(raw_binding_ids)
+            if len(binding_ids) != len(raw_binding_ids):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation contains duplicate binding ids",
+                )
+            if relocation_id in relocation_ids or project_id in project_ids:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "snapshot contains duplicate project relocation",
+                )
+            relocation_ids.add(relocation_id)
+            project_ids.add(project_id)
+            project_bindings = tuple(
+                binding
+                for binding in known_bindings
+                if binding.project_id == project_id and binding.configured
+            )
+            expected_ids = frozenset(binding.binding_id for binding in project_bindings)
+            if not project_bindings or binding_ids != expected_ids:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation must include every configured project binding",
+                )
+            if any(
+                binding.management_mode != ManagementMode.MANAGED for binding in project_bindings
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation requires all bindings to be managed",
+                )
+            normalized: dict[str, object] = {
+                "relocation_id": relocation_id,
+                "agent_instance_id": agent_instance_id,
+                "project_id": project_id,
+                "old_canonical_cwd": old_cwd,
+                "new_canonical_cwd": str(new_path),
+                "binding_ids": sorted(binding_ids),
+            }
+            existing_relocation = self.store.get_project_relocation(relocation_id)
+            current_paths = {binding.canonical_cwd for binding in project_bindings}
+            if existing_relocation is not None:
+                if existing_relocation != normalized or current_paths != {str(new_path)}:
+                    raise RuntimeFailureError(
+                        ErrorCode.INVALID_REQUEST,
+                        "project relocation id was reused with different state",
+                    )
+            else:
+                if current_paths != {old_cwd}:
+                    raise RuntimeFailureError(
+                        ErrorCode.PROJECT_RELOCATION_REQUIRED,
+                        "project relocation old path does not match every binding",
+                    )
+                live = self.store.live_binding_ids(binding_ids)
+                if live:
+                    raise RuntimeFailureError(
+                        ErrorCode.PROJECT_RELOCATION_REQUIRED,
+                        "project relocation requires all bindings to be stopped",
+                    )
+            if any(
+                binding.configured
+                and binding.project_id != project_id
+                and binding.canonical_cwd == str(new_path)
+                for binding in known_bindings
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "project relocation target belongs to another project",
+                )
+            relocations.append(normalized)
+        return relocations
 
     def _validate_snapshot_item(
         self,
@@ -796,6 +964,7 @@ class RuntimeServer:
         raw_desired: dict[str, Any],
         *,
         generation_id: str,
+        relocations_by_project: dict[str, dict[str, object]],
     ) -> tuple[RuntimeBinding, DesiredSpec, Path, str]:
         agent_instance_id = _required_str(raw_binding, "agent_instance_id")
         if agent_instance_id != self.config.agent_instance_id:
@@ -836,10 +1005,19 @@ class RuntimeServer:
         ):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "binding identity is immutable")
         if existing is not None and Path(existing.canonical_cwd) != requested_cwd:
-            raise RuntimeFailureError(
-                ErrorCode.PROJECT_RELOCATION_REQUIRED,
-                "project path change requires explicit relocation",
-            )
+            relocation = relocations_by_project.get(project_id)
+            binding_ids = relocation.get("binding_ids") if relocation is not None else None
+            if (
+                relocation is None
+                or relocation.get("old_canonical_cwd") != existing.canonical_cwd
+                or relocation.get("new_canonical_cwd") != str(requested_cwd)
+                or not isinstance(binding_ids, list)
+                or binding_id not in binding_ids
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.PROJECT_RELOCATION_REQUIRED,
+                    "project path change requires explicit relocation",
+                )
         profile_name = spec.account_profile
         if (
             not profile_name

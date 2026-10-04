@@ -57,6 +57,16 @@ rewrite its non-Codex engine or authorize a Codex launch. A later observed retur
 Retirement disables future managed launches and removes the local effective spec,
 but preserves binding, instance, and session-provenance history.
 
+An explicit Project path change is carried inside that full snapshot as
+`project_relocations`. Each record has a unique relocation ID, immutable Project ID,
+old/new canonical paths, and the complete set of configured bindings for that
+Project. Runtime accepts it only when every affected binding is stopped and managed,
+the target is an allowed existing directory not owned by another Project, and every
+binding plus DesiredSpec in the same snapshot adopts the new path. The topic-config
+change, effective specs, binding paths, and durable alias/history record commit as
+one operation. Omitting this record, relocating only part of a Project, or reusing an
+ID with different data fails closed.
+
 This protocol is local execution control, not a public CUS backend API. The CUS
 backend remains provider-neutral and talks through its Runtime connector.
 

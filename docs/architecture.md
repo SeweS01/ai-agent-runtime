@@ -35,7 +35,8 @@ development/operator convenience, not the production namespace mechanism.
 
 - CUS owns authoritative desired generation/revision/digest.
 - Runtime owns verified local effective specs, process evidence, session provenance,
-  the durable outbox, and a bounded last-control-plane-contact lease.
+  explicit Project relocation history, the durable outbox, and a bounded
+  last-control-plane-contact lease.
 - Telegram Agent owns its topic configuration and tmux state. Runtime is an
   independent file writer, so updates use eventual reconciliation rather than a
   false cross-process transaction guarantee.

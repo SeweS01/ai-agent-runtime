@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import time
 from pathlib import Path
+from typing import cast
 
 from ai_agent_runtime.domain import (
     DesiredSpec,
@@ -57,6 +58,15 @@ CREATE TABLE IF NOT EXISTS desired_namespaces (
     generation_id TEXT NOT NULL,
     snapshot_digest TEXT,
     updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_relocations (
+    relocation_id TEXT PRIMARY KEY,
+    agent_instance_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    old_canonical_cwd TEXT NOT NULL,
+    new_canonical_cwd TEXT NOT NULL,
+    binding_ids_json TEXT NOT NULL,
+    applied_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS control_plane_sync (
     agent_instance_id TEXT PRIMARY KEY,
@@ -263,6 +273,41 @@ class RuntimeStore:
             management_mode=ManagementMode(row["management_mode"]),
         )
 
+    def live_binding_ids(self, binding_ids: frozenset[str]) -> frozenset[str]:
+        if not binding_ids:
+            return frozenset()
+        placeholders = ",".join("?" for _ in binding_ids)
+        rows = self._connection.execute(
+            f"""
+            SELECT DISTINCT binding_id FROM instances
+            WHERE binding_id IN ({placeholders})
+              AND lifecycle NOT IN ('EXITED', 'RETIRED_FOR_RESTART')
+            """,
+            tuple(sorted(binding_ids)),
+        ).fetchall()
+        return frozenset(str(row["binding_id"]) for row in rows)
+
+    def get_project_relocation(self, relocation_id: str) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT * FROM project_relocations WHERE relocation_id=?",
+            (relocation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        binding_ids = json.loads(row["binding_ids_json"])
+        if not isinstance(binding_ids, list) or any(
+            not isinstance(binding_id, str) for binding_id in binding_ids
+        ):
+            raise ValueError("persisted project relocation binding ids are invalid")
+        return {
+            "relocation_id": str(row["relocation_id"]),
+            "agent_instance_id": str(row["agent_instance_id"]),
+            "project_id": str(row["project_id"]),
+            "old_canonical_cwd": str(row["old_canonical_cwd"]),
+            "new_canonical_cwd": str(row["new_canonical_cwd"]),
+            "binding_ids": sorted(binding_ids),
+        }
+
     def update_binding_observation(
         self,
         binding_id: str,
@@ -387,6 +432,7 @@ class RuntimeStore:
         snapshot_digest: str,
         updates: tuple[tuple[RuntimeBinding, DesiredSpec, Path, str], ...],
         retired_binding_ids: frozenset[str],
+        project_relocations: tuple[dict[str, object], ...] = (),
     ) -> None:
         """Atomically replace desired state without deleting runtime history."""
 
@@ -419,6 +465,11 @@ class RuntimeStore:
         same_generation = (
             current_namespace is not None and current_namespace["generation_id"] == generation_id
         )
+        relocations_by_project = {
+            str(relocation["project_id"]): relocation for relocation in project_relocations
+        }
+        if len(relocations_by_project) != len(project_relocations):
+            raise ValueError("snapshot contains duplicate project relocation")
         for binding, spec, _codex_home, _fingerprint in updates:
             if binding.agent_instance_id != agent_instance_id:
                 raise ValueError("snapshot binding AgentInstance mismatch")
@@ -439,9 +490,20 @@ class RuntimeStore:
                 or existing.chat_id != binding.chat_id
                 or existing.thread_id != binding.thread_id
                 or existing.project_id != binding.project_id
-                or existing.canonical_cwd != binding.canonical_cwd
             ):
                 raise ValueError("binding identity is immutable")
+            if existing is not None and existing.canonical_cwd != binding.canonical_cwd:
+                relocation = relocations_by_project.get(binding.project_id)
+                relocation_binding_ids = (
+                    cast(list[str], relocation["binding_ids"]) if relocation is not None else []
+                )
+                if (
+                    relocation is None
+                    or relocation["old_canonical_cwd"] != existing.canonical_cwd
+                    or relocation["new_canonical_cwd"] != binding.canonical_cwd
+                    or binding.binding_id not in relocation_binding_ids
+                ):
+                    raise ValueError("project path change requires explicit relocation")
             if same_generation:
                 self.validate_effective_spec_update(spec)
 
@@ -468,6 +530,7 @@ class RuntimeStore:
                         config_digest, management_mode
                     ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(binding_id) DO UPDATE SET
+                        canonical_cwd=excluded.canonical_cwd,
                         configured=excluded.configured,
                         config_digest=excluded.config_digest,
                         management_mode=excluded.management_mode
@@ -508,6 +571,41 @@ class RuntimeStore:
                         self._encode_spec(spec),
                         str(codex_home),
                         fingerprint,
+                        now,
+                    ),
+                )
+            for relocation in project_relocations:
+                relocation_binding_ids = cast(list[str], relocation["binding_ids"])
+                encoded_binding_ids = json.dumps(
+                    sorted(relocation_binding_ids),
+                    separators=(",", ":"),
+                )
+                existing_relocation = self.get_project_relocation(str(relocation["relocation_id"]))
+                normalized = {
+                    "relocation_id": str(relocation["relocation_id"]),
+                    "agent_instance_id": str(relocation["agent_instance_id"]),
+                    "project_id": str(relocation["project_id"]),
+                    "old_canonical_cwd": str(relocation["old_canonical_cwd"]),
+                    "new_canonical_cwd": str(relocation["new_canonical_cwd"]),
+                    "binding_ids": sorted(relocation_binding_ids),
+                }
+                if existing_relocation is not None and existing_relocation != normalized:
+                    raise ValueError("project relocation id was reused with different data")
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO project_relocations(
+                        relocation_id, agent_instance_id, project_id,
+                        old_canonical_cwd, new_canonical_cwd,
+                        binding_ids_json, applied_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized["relocation_id"],
+                        normalized["agent_instance_id"],
+                        normalized["project_id"],
+                        normalized["old_canonical_cwd"],
+                        normalized["new_canonical_cwd"],
+                        encoded_binding_ids,
                         now,
                     ),
                 )

@@ -11,6 +11,7 @@ import pytest
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
 from ai_agent_runtime.domain import DesiredSpec, ManagementMode, RuntimeBinding, sha256_digest
+from ai_agent_runtime.errors import RuntimeFailureError
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.process_safety import proc_starttime, profile_fingerprint
@@ -694,3 +695,223 @@ async def test_snapshot_preserves_unmanaged_binding_without_rewriting_topic(
     assert topic.engine == "claude"
     assert topic.exec_mode == "subprocess"
     assert not (config.state_dir / "topic-config-backups").exists()
+
+
+def test_project_relocation_requires_explicit_complete_stopped_snapshot(tmp_path: Path) -> None:
+    old_project = tmp_path / "old-project"
+    old_project.mkdir()
+    new_project = tmp_path / "new-project"
+    new_project.mkdir()
+    profile = tmp_path / "profiles" / "work"
+    profile.mkdir(parents=True)
+    (profile / "auth.json").write_text("{}", encoding="utf-8")
+    (profile / "auth.json").chmod(0o600)
+    real_codex = tmp_path / "codex-real"
+    real_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_codex.chmod(0o700)
+    topic_config = tmp_path / "topic_config.json"
+    topic_config.write_text(
+        json.dumps(
+            {
+                "topics": {
+                    "42": {
+                        "cwd": str(old_project),
+                        "engine": "codex",
+                        "exec_mode": "tmux",
+                        "unknown": "preserved",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = RuntimeConfig(
+        agent_instance_id="agent-1",
+        forum_chat_id=-1001,
+        state_dir=tmp_path / "state",
+        socket_path=tmp_path / "run" / "runtime.sock",
+        database_path=tmp_path / "state" / "runtime.sqlite",
+        real_codex=real_codex,
+        real_codex_version="test",
+        real_codex_sha256=f"sha256:{hashlib.sha256(real_codex.read_bytes()).hexdigest()}",
+        profiles_root=tmp_path / "profiles",
+        topic_config_path=topic_config,
+        tmux_state_path=tmp_path / "tmux-state.json",
+        upstream_sha="0" * 40,
+        allowed_project_roots=(tmp_path,),
+    )
+    daemon = RuntimeServer(config)
+    original_binding = RuntimeBinding(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        chat_id=-1001,
+        thread_id=42,
+        project_id="project-1",
+        canonical_cwd=str(old_project),
+        expected_tmux_session="cc-n1001-42",
+        config_digest=read_topic_config(topic_config).digest,
+    )
+    daemon.store.upsert_binding(original_binding)
+    original_spec = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(old_project),
+        provider="codex",
+        account_profile="work",
+        model="gpt-test",
+        reasoning_effort="high",
+        generation_id="gen-1",
+        revision=1,
+    )
+    daemon.store.put_effective_spec(
+        original_spec,
+        codex_home=profile,
+        profile_fingerprint=profile_fingerprint(profile),
+    )
+    relocated_spec = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(new_project),
+        provider="codex",
+        account_profile="work",
+        model="gpt-test",
+        reasoning_effort="high",
+        generation_id="gen-1",
+        revision=2,
+    )
+    item = {
+        "binding": {
+            "binding_id": "binding-1",
+            "agent_instance_id": "agent-1",
+            "chat_id": -1001,
+            "thread_id": 42,
+            "project_id": "project-1",
+            "canonical_cwd": str(new_project),
+        },
+        "desired": {
+            "binding_id": relocated_spec.binding_id,
+            "agent_instance_id": relocated_spec.agent_instance_id,
+            "project_id": relocated_spec.project_id,
+            "canonical_cwd": relocated_spec.canonical_cwd,
+            "provider": relocated_spec.provider,
+            "account_profile": relocated_spec.account_profile,
+            "model": relocated_spec.model,
+            "reasoning_effort": relocated_spec.reasoning_effort,
+            "generation_id": relocated_spec.generation_id,
+            "revision": relocated_spec.revision,
+            "spec_digest": relocated_spec.spec_digest,
+        },
+    }
+    implicit_material = {
+        "agent_instance_id": "agent-1",
+        "generation_id": "gen-1",
+        "bindings": [item],
+        "retired_binding_ids": [],
+    }
+    with pytest.raises(RuntimeFailureError) as implicit:
+        daemon._apply_snapshot(
+            "implicit",
+            {**implicit_material, "snapshot_digest": sha256_digest(implicit_material)},
+        )
+    assert implicit.value.code.value == "PROJECT_RELOCATION_REQUIRED"
+
+    relocation = {
+        "relocation_id": "relocation-1",
+        "agent_instance_id": "agent-1",
+        "project_id": "project-1",
+        "old_canonical_cwd": str(old_project),
+        "new_canonical_cwd": str(new_project),
+        "binding_ids": ["binding-1"],
+    }
+    explicit_material = {
+        **implicit_material,
+        "project_relocations": [relocation],
+    }
+    explicit = daemon._apply_snapshot(
+        "explicit",
+        {**explicit_material, "snapshot_digest": sha256_digest(explicit_material)},
+    )
+    assert explicit["ok"] is True
+    assert explicit["project_relocations"] == ["relocation-1"]
+    stored_binding = daemon.store.get_binding("binding-1")
+    assert stored_binding is not None
+    assert stored_binding.project_id == "project-1"
+    assert stored_binding.canonical_cwd == str(new_project)
+    stored_spec = daemon.store.get_effective_spec("binding-1")
+    assert stored_spec is not None and stored_spec[0] == relocated_spec
+    assert daemon.store.get_project_relocation("relocation-1") == relocation
+    topic = read_topic_config(topic_config).topic(42)
+    assert topic is not None
+    assert topic.cwd == str(new_project)
+    assert topic.raw["unknown"] == "preserved"
+
+
+def test_project_relocation_denies_live_binding(tmp_path: Path) -> None:
+    old_project = tmp_path / "old"
+    old_project.mkdir()
+    new_project = tmp_path / "new"
+    new_project.mkdir()
+    profile = tmp_path / "profiles" / "work"
+    profile.mkdir(parents=True)
+    (profile / "auth.json").write_text("{}", encoding="utf-8")
+    (profile / "auth.json").chmod(0o600)
+    real_codex = tmp_path / "codex-real"
+    real_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_codex.chmod(0o700)
+    topic_config = tmp_path / "topic.json"
+    topic_config.write_text(
+        json.dumps(
+            {"topics": {"42": {"cwd": str(old_project), "engine": "codex", "exec_mode": "tmux"}}}
+        ),
+        encoding="utf-8",
+    )
+    config = RuntimeConfig(
+        agent_instance_id="agent-1",
+        forum_chat_id=-1001,
+        state_dir=tmp_path / "state",
+        socket_path=tmp_path / "run/runtime.sock",
+        database_path=tmp_path / "state/runtime.sqlite",
+        real_codex=real_codex,
+        real_codex_version="test",
+        real_codex_sha256=f"sha256:{hashlib.sha256(real_codex.read_bytes()).hexdigest()}",
+        profiles_root=tmp_path / "profiles",
+        topic_config_path=topic_config,
+        tmux_state_path=tmp_path / "state.json",
+        upstream_sha="0" * 40,
+        allowed_project_roots=(tmp_path,),
+    )
+    daemon = RuntimeServer(config)
+    binding = RuntimeBinding(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        chat_id=-1001,
+        thread_id=42,
+        project_id="project-1",
+        canonical_cwd=str(old_project),
+        expected_tmux_session="cc-n1001-42",
+    )
+    daemon.store.upsert_binding(binding)
+    daemon.store.record_instance(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        wrapper_pid=100,
+        wrapper_starttime=1,
+        child_pid=101,
+        child_starttime=2,
+        tmux_session="cc-n1001-42",
+        tmux_pane="%1",
+        lifecycle="IDLE",
+        applied_digest=None,
+    )
+    relocation = {
+        "relocation_id": "relocation-1",
+        "agent_instance_id": "agent-1",
+        "project_id": "project-1",
+        "old_canonical_cwd": str(old_project),
+        "new_canonical_cwd": str(new_project),
+        "binding_ids": ["binding-1"],
+    }
+    with pytest.raises(RuntimeFailureError, match="stopped"):
+        daemon._validate_project_relocations([relocation])
