@@ -20,6 +20,7 @@ from ai_agent_runtime.deployment.install import (
     install_runtime_release,
     verify_runtime_install_report,
 )
+from ai_agent_runtime.deployment.prepare import prepare_instance_links
 from ai_agent_runtime.health.doctor import collect_doctor_report
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
@@ -352,6 +353,27 @@ def _deployment_verify_install(*, report: str, output: str | None) -> int:
     return 0 if verification["accepted"] is True else 1
 
 
+def _deployment_prepare_instance(
+    *,
+    install_report: str,
+    agent_instance_id: str,
+    instance_link: str,
+    runtime_link: str,
+    wrapper_link: str,
+    output: str,
+) -> int:
+    report = prepare_instance_links(
+        install_report=Path(install_report),
+        agent_instance_id=agent_instance_id,
+        instance_link=Path(instance_link),
+        runtime_link=Path(runtime_link),
+        wrapper_link=Path(wrapper_link),
+    )
+    write_json_artifact(Path(output).expanduser(), report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -431,6 +453,13 @@ def main() -> None:
     deployment_verify_install = deployment_commands.add_parser("verify-install")
     deployment_verify_install.add_argument("--report", required=True)
     deployment_verify_install.add_argument("--output")
+    deployment_prepare = deployment_commands.add_parser("prepare-instance-links")
+    deployment_prepare.add_argument("--install-report", required=True)
+    deployment_prepare.add_argument("--agent-instance-id", required=True)
+    deployment_prepare.add_argument("--instance-link", required=True)
+    deployment_prepare.add_argument("--runtime-link", required=True)
+    deployment_prepare.add_argument("--wrapper-link", required=True)
+    deployment_prepare.add_argument("--output", required=True)
     deployment_audit = deployment_commands.add_parser("audit")
     deployment_audit.add_argument("--manifest", required=True)
     deployment_audit.add_argument("--output")
@@ -517,6 +546,17 @@ def main() -> None:
                 raise SystemExit(
                     _deployment_verify_install(
                         report=namespace.report,
+                        output=namespace.output,
+                    )
+                )
+            if namespace.deployment_command == "prepare-instance-links":
+                raise SystemExit(
+                    _deployment_prepare_instance(
+                        install_report=namespace.install_report,
+                        agent_instance_id=namespace.agent_instance_id,
+                        instance_link=namespace.instance_link,
+                        runtime_link=namespace.runtime_link,
+                        wrapper_link=namespace.wrapper_link,
                         output=namespace.output,
                     )
                 )

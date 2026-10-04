@@ -45,6 +45,14 @@ ai-agent-runtime deployment install-release \
 ai-agent-runtime deployment verify-install \
   --report /srv/qualification/runtime-install-report.json \
   --output /srv/qualification/runtime-install-verification.json
+
+ai-agent-runtime deployment prepare-instance-links \
+  --install-report /srv/qualification/runtime-install-report.json \
+  --agent-instance-id ta_staging_01 \
+  --instance-link /home/devops/.local/lib/ai-agent-runtime/instances/ta_staging_01 \
+  --runtime-link /home/devops/.local/bin/ai-agent-runtime@ta_staging_01 \
+  --wrapper-link /home/devops/.local/bin/codex-wrapper@ta_staging_01 \
+  --output /srv/qualification/ta_staging_01-link-preparation.json
 ```
 
 An upgrade repeats this command with a new release ID. The result is
@@ -54,6 +62,13 @@ venv at its final unique release path because Python entrypoint shebangs are not
 relocatable. A private `.installing` marker exists only while that new directory is
 being populated; failure removes that new directory, while success fsyncs it and
 removes the marker. Merely installing a directory never activates it.
+
+`prepare-instance-links` is intentionally limited to an absent instance. It creates
+one instance link to the verified release and two stable, instance-named entrypoints
+through that link; it refuses to replace or upgrade any existing path. Its result is
+`PREPARED_NOT_STARTED`: no service is started/restarted and no production cutover is
+authorized. An upgrade of an existing instance requires a separately audited switch
+procedure rather than reusing this initial-preparation command.
 
 Capture the effective, secret-free deployment values in a digest-protected
 `ai-agent-runtime.deployment-manifest.v1` artifact. Each `--instance` file is a
