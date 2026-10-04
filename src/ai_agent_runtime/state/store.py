@@ -20,6 +20,7 @@ from ai_agent_runtime.domain import (
     RolloutObservationCursor,
     RolloutObservationTarget,
     RuntimeBinding,
+    SyncState,
     UserNotificationCode,
     sha256_digest,
 )
@@ -167,6 +168,9 @@ _PUBLIC_APPLIED_EVIDENCE_FIELDS = frozenset(
         "connection_generation",
         "tmux_session",
         "tmux_pane",
+        "observed_event_id",
+        "observed_evidence_digest",
+        "observation_sequence",
     }
 )
 
@@ -478,6 +482,8 @@ class RuntimeStore:
                 "generation_id": spec.generation_id,
                 "revision": spec.revision,
                 "spec_digest": spec.spec_digest,
+                "source_kind": spec.source_kind,
+                "source_ref": spec.source_ref,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -693,6 +699,73 @@ class RuntimeStore:
         if not spec.verify_digest():
             raise ValueError("persisted effective spec digest mismatch")
         return spec, Path(row["codex_home"]), row["profile_fingerprint"]
+
+    def get_launch_spec(self, binding_id: str) -> tuple[DesiredSpec, Path, str] | None:
+        """Return authoritative desired plus the latest valid offline observed overlay."""
+
+        effective = self.get_effective_spec(binding_id)
+        if effective is None:
+            return None
+        spec, codex_home, profile_fingerprint_value = effective
+        rows = self._connection.execute(
+            """
+            SELECT event_id, payload_json
+            FROM outbox
+            WHERE binding_id=?
+              AND kind='OBSERVED_SPEC_PROPOSAL'
+              AND ack_state='PENDING'
+            """,
+            (binding_id,),
+        ).fetchall()
+        proposals: list[tuple[int, str, dict[str, object]]] = []
+        for row in rows:
+            decoded = json.loads(row["payload_json"])
+            if not isinstance(decoded, dict):
+                continue
+            sequence = decoded.get("observation_sequence")
+            if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+                continue
+            proposals.append((sequence, str(row["event_id"]), decoded))
+        for _sequence, event_id, proposal in sorted(proposals, reverse=True):
+            if (
+                proposal.get("base_generation_id") != spec.generation_id
+                or proposal.get("base_revision") != spec.revision
+                or proposal.get("base_spec_digest") != spec.spec_digest
+            ):
+                continue
+            model = proposal.get("model")
+            effort = proposal.get("reasoning_effort")
+            if not isinstance(model, str) or not model or not isinstance(effort, str) or not effort:
+                continue
+            overlay = self._observed_overlay_spec(spec, event_id=event_id, proposal=proposal)
+            return overlay, codex_home, profile_fingerprint_value
+        return effective
+
+    @staticmethod
+    def _observed_overlay_spec(
+        spec: DesiredSpec,
+        *,
+        event_id: str,
+        proposal: dict[str, object],
+    ) -> DesiredSpec:
+        model = proposal.get("model")
+        effort = proposal.get("reasoning_effort")
+        if not isinstance(model, str) or not model or not isinstance(effort, str) or not effort:
+            raise ValueError("observed proposal model/reasoning is invalid")
+        return DesiredSpec.build(
+            binding_id=spec.binding_id,
+            agent_instance_id=spec.agent_instance_id,
+            project_id=spec.project_id,
+            canonical_cwd=spec.canonical_cwd,
+            provider=spec.provider,
+            account_profile=spec.account_profile,
+            model=model,
+            reasoning_effort=effort,
+            generation_id=spec.generation_id,
+            revision=spec.revision + 1,
+            source_kind="observed_runtime_pending",
+            source_ref=event_id,
+        )
 
     def record_instance(
         self,
@@ -935,6 +1008,12 @@ class RuntimeStore:
               AND b.configured=1
               AND b.management_mode='MANAGED'
               AND a.spec_digest != e.spec_digest
+              AND NOT EXISTS (
+                  SELECT 1 FROM outbox AS pending_observed
+                  WHERE pending_observed.binding_id=i.binding_id
+                    AND pending_observed.kind='OBSERVED_SPEC_PROPOSAL'
+                    AND pending_observed.ack_state='PENDING'
+              )
               AND (
                   SELECT count(*) FROM instances AS live
                   WHERE live.binding_id=i.binding_id
@@ -1359,6 +1438,16 @@ class RuntimeStore:
                 for row in rows
             ]
             active = [item for item in instances if item["lifecycle"] != "EXITED"]
+            active_applied_digests = frozenset(
+                str(applied["spec_digest"])
+                for item in active
+                if isinstance((applied := item.get("applied")), dict)
+                and isinstance(applied.get("spec_digest"), str)
+            )
+            observed_sync = self.observed_sync_state(
+                binding.binding_id,
+                active_applied_digests=active_applied_digests,
+            )
             if not binding.configured or desired is None:
                 health = "OUT_OF_SYNC"
             elif binding.management_mode != ManagementMode.MANAGED:
@@ -1375,6 +1464,8 @@ class RuntimeStore:
                 health = "PENDING_CHANGE"
             else:
                 health = "RUNTIME_HEALTHY"
+            if observed_sync is not None and health in {"RUNTIME_HEALTHY", "PENDING_CHANGE"}:
+                health = observed_sync.value
             reports.append(
                 {
                     "binding_id": binding.binding_id,
@@ -1406,6 +1497,159 @@ class RuntimeStore:
             payload=proposal.payload(),
         )
         return proposal.event_id
+
+    def record_observed_proposal(self, proposal: ObservedSpecProposal) -> DesiredSpec:
+        """Durably record observed state as both outbox proposal and local LKG overlay."""
+
+        effective = self.get_effective_spec(proposal.binding_id)
+        if effective is None:
+            raise ValueError("observed binding has no authoritative local spec")
+        base, _codex_home, _profile_fingerprint = effective
+        if (
+            proposal.base_generation_id != base.generation_id
+            or proposal.base_revision != base.revision
+            or proposal.base_spec_digest != base.spec_digest
+        ):
+            raise ValueError("observed proposal base differs from authoritative local spec")
+        payload = proposal.payload()
+        overlay = self._observed_overlay_spec(
+            base,
+            event_id=proposal.event_id,
+            proposal=payload,
+        )
+        row = self._connection.execute(
+            """
+            SELECT a.evidence_json, i.lifecycle
+            FROM applied_specs AS a
+            JOIN instances AS i ON i.instance_id=a.instance_id
+            WHERE a.instance_id=? AND a.binding_id=? AND i.binding_id=?
+              AND i.lifecycle IN ('IDLE', 'BUSY')
+            """,
+            (proposal.instance_id, proposal.binding_id, proposal.binding_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("observed proposal has no matching live AppliedSpec")
+        evidence = json.loads(row["evidence_json"])
+        if not isinstance(evidence, dict):
+            raise ValueError("observed AppliedSpec evidence is invalid")
+        evidence.update(
+            {
+                "spec_digest": overlay.spec_digest,
+                "actual_model": overlay.model,
+                "actual_reasoning_effort": overlay.reasoning_effort,
+                "observed_event_id": proposal.event_id,
+                "observed_evidence_digest": proposal.evidence_digest,
+                "observation_sequence": proposal.observation_sequence,
+            }
+        )
+        encoded_evidence = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+        encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload_digest = sha256_digest(payload)
+        existing = self._connection.execute(
+            "SELECT payload_digest FROM outbox WHERE event_id=?",
+            (proposal.event_id,),
+        ).fetchone()
+        if existing is not None and existing["payload_digest"] != payload_digest:
+            raise ValueError("outbox event_id reused with different payload")
+        now = time.time()
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO outbox(
+                    event_id, kind, binding_id, payload_json, payload_digest,
+                    attempts, next_retry_at, ack_state
+                ) VALUES(?, 'OBSERVED_SPEC_PROPOSAL', ?, ?, ?, 0, 0, 'PENDING')
+                ON CONFLICT(event_id) DO NOTHING
+                """,
+                (
+                    proposal.event_id,
+                    proposal.binding_id,
+                    encoded_payload,
+                    payload_digest,
+                ),
+            )
+            applied = self._connection.execute(
+                """
+                UPDATE applied_specs
+                SET generation_id=?, revision=?, spec_digest=?, evidence_json=?, verified_at=?
+                WHERE instance_id=? AND binding_id=?
+                """,
+                (
+                    overlay.generation_id,
+                    overlay.revision,
+                    overlay.spec_digest,
+                    encoded_evidence,
+                    now,
+                    proposal.instance_id,
+                    proposal.binding_id,
+                ),
+            )
+            instance = self._connection.execute(
+                """
+                UPDATE instances SET applied_digest=?, updated_at=?
+                WHERE instance_id=? AND binding_id=? AND lifecycle IN ('IDLE', 'BUSY')
+                """,
+                (
+                    overlay.spec_digest,
+                    now,
+                    proposal.instance_id,
+                    proposal.binding_id,
+                ),
+            )
+            if applied.rowcount != 1 or instance.rowcount != 1:
+                raise ValueError("observed proposal target changed before commit")
+        return overlay
+
+    def observed_sync_state(
+        self,
+        binding_id: str,
+        *,
+        active_applied_digests: frozenset[str],
+    ) -> SyncState | None:
+        """Derive user-visible observed synchronization state from durable evidence."""
+
+        pending = self._connection.execute(
+            """
+            SELECT 1 FROM outbox
+            WHERE binding_id=? AND kind='OBSERVED_SPEC_PROPOSAL' AND ack_state='PENDING'
+            LIMIT 1
+            """,
+            (binding_id,),
+        ).fetchone()
+        if pending is not None:
+            return SyncState.OBSERVED_PENDING_SYNC
+        if not active_applied_digests:
+            return None
+        effective = self.get_effective_spec(binding_id)
+        if effective is None:
+            return None
+        base, _codex_home, _profile_fingerprint = effective
+        rejected = self._connection.execute(
+            """
+            SELECT event_id, payload_json FROM outbox
+            WHERE binding_id=? AND kind='OBSERVED_SPEC_PROPOSAL'
+              AND ack_state='POLICY_REJECTED'
+            """,
+            (binding_id,),
+        ).fetchall()
+        for row in rejected:
+            proposal = json.loads(row["payload_json"])
+            if not isinstance(proposal, dict):
+                continue
+            if (
+                proposal.get("base_generation_id") != base.generation_id
+                or proposal.get("base_revision") != base.revision
+                or proposal.get("base_spec_digest") != base.spec_digest
+            ):
+                continue
+            overlay = self._observed_overlay_spec(
+                base,
+                event_id=str(row["event_id"]),
+                proposal=proposal,
+            )
+            if overlay.spec_digest in active_applied_digests:
+                return SyncState.OBSERVED_POLICY_REJECTED
+        return None
 
     def enqueue_user_notification(
         self,

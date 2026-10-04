@@ -105,6 +105,14 @@ lease. `outbox_ack` finalizes an event as `ACKED`, `STALE_OBSERVED`, or
 is rejected. Observed proposals carry their base generation/revision/digest so CUS
 can reject delayed state rather than overwrite a newer user choice.
 
+Pending proposals also back the Runtime's local launch overlay and are visible as
+`OBSERVED_PENDING_SYNC`. `POLICY_REJECTED` remains visible as
+`OBSERVED_POLICY_REJECTED` while the rejected proven process state is still live;
+once that state is retired and the authoritative desired spec is relaunched, the
+status clears. Desired IPC payloads preserve `source_kind` and `source_ref` so an
+accepted observed revision cannot feed back into a second proposal or cause an
+unnecessary retirement.
+
 Runtime also emits sanitized `USER_NOTIFICATION_REQUIRED` events for
 `ONBOARDING_REQUIRED`, `RESUME_BINDING_MISMATCH`, and
 `UNSUPPORTED_CODEX_SUBPROCESS`. Their immutable identity is binding-scoped and

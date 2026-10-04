@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from pathlib import Path
 
 from ai_agent_runtime.config import RuntimeConfig
@@ -78,6 +79,7 @@ def _daemon_with_applied_rollout(
         tmux_pane="%1",
         lifecycle="IDLE",
         applied_digest=None,
+        heartbeat_at=time.time(),
     )
     rollout_stat = rollout.stat()
     daemon.store.record_applied_spec(
@@ -131,6 +133,105 @@ def test_structured_turn_context_creates_one_durable_observed_proposal(tmp_path:
 
     daemon._observe_codex_rollout(daemon.store.rollout_observation_targets()[0])
     assert daemon.store.summary()["outbox_pending"] == 1
+
+
+def test_observed_change_is_local_lkg_until_cus_policy_decision(tmp_path: Path) -> None:
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.touch(mode=0o600)
+    daemon = _daemon_with_applied_rollout(tmp_path, rollout=rollout)
+    _append(
+        rollout,
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
+    )
+    _append(
+        rollout,
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "t1", "model": "gpt-new", "effort": "high"},
+        },
+    )
+    _append(
+        rollout,
+        {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1"}},
+    )
+
+    daemon._observe_codex_rollout(daemon.store.rollout_observation_targets()[0])
+
+    launch = daemon.store.get_launch_spec("binding-1")
+    assert launch is not None
+    overlay, _home, _fingerprint = launch
+    assert (overlay.model, overlay.reasoning_effort, overlay.revision) == (
+        "gpt-new",
+        "high",
+        2,
+    )
+    assert overlay.source_kind == "observed_runtime_pending"
+    report = daemon.store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert report["health"] == "OBSERVED_PENDING_SYNC"  # type: ignore[index]
+    assert report["instances"][0]["applied"]["spec_digest"] == overlay.spec_digest  # type: ignore[index]
+    assert daemon.store.retirement_candidates() == ()
+
+    event = daemon.store.claim_outbox(now=1.0)[0]
+    daemon.store.acknowledge_outbox(str(event["event_id"]), "POLICY_REJECTED")
+
+    restored_launch = daemon.store.get_launch_spec("binding-1")
+    assert restored_launch is not None
+    assert restored_launch[0].model == "gpt-old"
+    rejected = daemon.store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert rejected["health"] == "OBSERVED_POLICY_REJECTED"  # type: ignore[index]
+    candidates = daemon.store.retirement_candidates()
+    assert len(candidates) == 1
+    assert candidates[0].applied_spec_digest == overlay.spec_digest
+
+
+def test_accepted_observed_revision_becomes_applied_without_retirement(tmp_path: Path) -> None:
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.touch(mode=0o600)
+    daemon = _daemon_with_applied_rollout(tmp_path, rollout=rollout)
+    for record in (
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "t1", "model": "gpt-new", "effort": "high"},
+        },
+        {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1"}},
+    ):
+        _append(rollout, record)
+    daemon._observe_codex_rollout(daemon.store.rollout_observation_targets()[0])
+    event = daemon.store.claim_outbox(now=1.0)[0]
+    launch = daemon.store.get_launch_spec("binding-1")
+    assert launch is not None
+    overlay, codex_home, profile_fingerprint = launch
+    accepted = DesiredSpec.build(
+        binding_id=overlay.binding_id,
+        agent_instance_id=overlay.agent_instance_id,
+        project_id=overlay.project_id,
+        canonical_cwd=overlay.canonical_cwd,
+        provider=overlay.provider,
+        account_profile=overlay.account_profile,
+        model=overlay.model,
+        reasoning_effort=overlay.reasoning_effort,
+        generation_id=overlay.generation_id,
+        revision=overlay.revision,
+        source_kind="observed_runtime",
+        source_ref=str(event["event_id"]),
+    )
+    assert accepted.spec_digest == overlay.spec_digest
+
+    daemon.store.put_effective_spec(
+        accepted,
+        codex_home=codex_home,
+        profile_fingerprint=profile_fingerprint,
+    )
+    daemon.store.acknowledge_outbox(str(event["event_id"]), "ACKED")
+
+    report = daemon.store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert report["health"] == "RUNTIME_HEALTHY"  # type: ignore[index]
+    assert daemon.store.retirement_candidates() == ()
+    effective = daemon.store.get_effective_spec("binding-1")
+    assert effective is not None
+    assert effective[0].source_kind == "observed_runtime"
+    assert effective[0].source_ref == event["event_id"]
 
 
 def test_historical_change_reverted_before_catchup_does_not_emit(tmp_path: Path) -> None:

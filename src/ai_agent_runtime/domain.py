@@ -94,6 +94,8 @@ class DesiredSpec:
     generation_id: str
     revision: int
     spec_digest: str
+    source_kind: str | None = None
+    source_ref: str | None = None
 
     @classmethod
     def build(
@@ -109,6 +111,8 @@ class DesiredSpec:
         reasoning_effort: str,
         generation_id: str,
         revision: int,
+        source_kind: str | None = None,
+        source_ref: str | None = None,
     ) -> DesiredSpec:
         payload: dict[str, Any] = {
             "account_profile": account_profile,
@@ -134,6 +138,8 @@ class DesiredSpec:
             generation_id=generation_id,
             revision=revision,
             spec_digest=sha256_digest(payload),
+            source_kind=source_kind,
+            source_ref=source_ref,
         )
 
     @property

@@ -296,7 +296,7 @@ class RuntimeServer:
                 event_ref=config_snapshot.digest,
             )
             raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "binding is not configured")
-        effective = self.store.get_effective_spec(binding.binding_id)
+        effective = self.store.get_launch_spec(binding.binding_id)
         if effective is None:
             raise RuntimeFailureError(
                 ErrorCode.UNKNOWN_BINDING, "binding has no verified local spec"
@@ -1538,7 +1538,7 @@ class RuntimeServer:
                         "provider_evidence_digest": pending_evidence,
                     }
                 )
-                self.store.enqueue_observed_proposal(
+                self.store.record_observed_proposal(
                     ObservedSpecProposal(
                         binding_id=target.binding_id,
                         base_generation_id=spec.generation_id,
@@ -1671,9 +1671,25 @@ def _desired_spec(payload: dict[str, Any]) -> DesiredSpec:
             generation_id=_required_str(payload, "generation_id"),
             revision=_required_int(payload, "revision"),
             spec_digest=_required_str(payload, "spec_digest"),
+            source_kind=_optional_str(payload, "source_kind", max_length=64),
+            source_ref=_optional_str(payload, "source_ref", max_length=256),
         )
     except TypeError as exc:
         raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
     if not spec.verify_digest():
         raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "desired spec digest mismatch")
     return spec
+
+
+def _optional_str(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    max_length: int,
+) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > max_length:
+        raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, f"invalid {key}")
+    return value

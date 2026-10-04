@@ -92,6 +92,8 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         reasoning_effort="high",
         generation_id="gen-1",
         revision=1,
+        source_kind="cus_ui",
+        source_ref="user:1",
     )
     daemon.store.put_effective_spec(
         spec,
@@ -421,6 +423,8 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
         reasoning_effort="high",
         generation_id="gen-1",
         revision=1,
+        source_kind="cus_ui",
+        source_ref="user:1",
     )
     desired_payload = {
         "binding_id": spec.binding_id,
@@ -434,6 +438,8 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
         "generation_id": spec.generation_id,
         "revision": spec.revision,
         "spec_digest": spec.spec_digest,
+        "source_kind": spec.source_kind,
+        "source_ref": spec.source_ref,
     }
     request_id = str(uuid.uuid4())
     payload = versioned(
@@ -462,6 +468,10 @@ async def test_apply_binding_is_durable_idempotent_and_never_uses_default_codex(
         await asyncio.sleep(0.01)
     applied = await request(config.socket_path, payload)
     assert applied["ok"] is True
+    persisted = daemon.store.get_effective_spec("binding-1")
+    assert persisted is not None
+    assert persisted[0].source_kind == "cus_ui"
+    assert persisted[0].source_ref == "user:1"
     topic = read_topic_config(topic_config).topic(42)
     assert topic is not None
     assert topic.cwd == str(project)

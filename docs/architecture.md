@@ -56,6 +56,16 @@ byte offset, retains metadata only, and writes an idempotent observed proposal t
 outbox when the proven settings differ from local desired state. Ordinary transcript
 text, Telegram commands, picker screens, and output silence never become evidence.
 
+The same durable transaction records a binding-scoped local LKG overlay for the
+proven model/reasoning. While its proposal awaits CUS, new launches of that binding
+use the overlay without making CUS synchronous startup infrastructure, health is
+`OBSERVED_PENDING_SYNC`, and automatic retirement is suppressed. CUS transports
+desired provenance (`source_kind`/`source_ref`) outside the desired digest. An
+accepted observed revision therefore becomes authoritative with the same digest as
+the already proven process and needs no redundant restart. A stale or policy-rejected
+proposal stops being a launch overlay; if the live process still differs from the
+authoritative desired spec, the normal safe-IDLE retirement flow restores it.
+
 Fail-closed launch paths that require a user explanation enqueue a sanitized,
 binding-scoped notification event. Runtime never receives a Telegram token and never
 sends that message itself; the CUS connector and CUS Bot remain the delivery adapter.
