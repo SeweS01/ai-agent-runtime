@@ -26,9 +26,18 @@ The production Telegram Agent drop-in must retain `KillMode=process` so its rest
 does not recursively destroy qualified tmux/wrapper/Codex processes.
 
 Capture the effective, secret-free deployment values in a digest-protected
-`ai-agent-runtime.deployment-manifest.v1` artifact and audit it before staging:
+`ai-agent-runtime.deployment-manifest.v1` artifact. Each `--instance` file is a
+secret-free JSON object containing one `agent_instances` entry described below.
+Build and audit the artifact before staging:
 
 ```bash
+ai-agent-runtime deployment manifest \
+  --target staging \
+  --qualification-manifest /srv/qualification/qualification-manifest.json \
+  --rollback-manifest /srv/qualification/rollback-manifest.json \
+  --instance /srv/qualification/instances/ta_staging_01.json \
+  --output /srv/qualification/deployment-manifest.json
+
 ai-agent-runtime deployment audit \
   --manifest /srv/qualification/deployment-manifest.json \
   --output /srv/qualification/deployment-audit.json

@@ -12,7 +12,10 @@ from pathlib import Path
 
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
-from ai_agent_runtime.deployment.audit import audit_deployment_manifest
+from ai_agent_runtime.deployment.audit import (
+    audit_deployment_manifest,
+    build_deployment_manifest,
+)
 from ai_agent_runtime.health.doctor import collect_doctor_report
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
@@ -281,6 +284,38 @@ def _deployment_audit(*, manifest: str, output: str | None) -> int:
     return 0 if report["accepted"] else 1
 
 
+def _deployment_manifest(
+    *,
+    target: str,
+    qualification_manifest: str,
+    rollback_manifest: str,
+    instances: list[str],
+    output: str,
+) -> int:
+    descriptors = [_read_release_tuple(path) for path in instances]
+    manifest = build_deployment_manifest(
+        target=target,
+        qualification_manifest=Path(qualification_manifest),
+        rollback_manifest=Path(rollback_manifest),
+        agent_instances=descriptors,
+    )
+    destination = Path(output).expanduser()
+    write_json_artifact(destination, manifest)
+    print(
+        json.dumps(
+            {
+                "output": str(destination),
+                "target": target,
+                "manifest_digest": manifest["manifest_digest"],
+                "instances": len(descriptors),
+                "mutations_performed": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -343,6 +378,12 @@ def main() -> None:
     qualification_verify.add_argument("--output")
     deployment = commands.add_parser("deployment")
     deployment_commands = deployment.add_subparsers(dest="deployment_command", required=True)
+    deployment_manifest = deployment_commands.add_parser("manifest")
+    deployment_manifest.add_argument("--target", choices=("staging", "production"), required=True)
+    deployment_manifest.add_argument("--qualification-manifest", required=True)
+    deployment_manifest.add_argument("--rollback-manifest", required=True)
+    deployment_manifest.add_argument("--instance", action="append", default=[], required=True)
+    deployment_manifest.add_argument("--output", required=True)
     deployment_audit = deployment_commands.add_parser("audit")
     deployment_audit.add_argument("--manifest", required=True)
     deployment_audit.add_argument("--output")
@@ -402,13 +443,24 @@ def main() -> None:
                         output=namespace.output,
                     )
                 )
-        if namespace.command == "deployment" and namespace.deployment_command == "audit":
-            raise SystemExit(
-                _deployment_audit(
-                    manifest=namespace.manifest,
-                    output=namespace.output,
+        if namespace.command == "deployment":
+            if namespace.deployment_command == "manifest":
+                raise SystemExit(
+                    _deployment_manifest(
+                        target=namespace.target,
+                        qualification_manifest=namespace.qualification_manifest,
+                        rollback_manifest=namespace.rollback_manifest,
+                        instances=namespace.instance,
+                        output=namespace.output,
+                    )
                 )
-            )
+            if namespace.deployment_command == "audit":
+                raise SystemExit(
+                    _deployment_audit(
+                        manifest=namespace.manifest,
+                        output=namespace.output,
+                    )
+                )
         if namespace.command == "inventory":
             if namespace.inventory_command == "compare":
                 raise SystemExit(

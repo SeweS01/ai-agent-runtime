@@ -40,6 +40,45 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def build_deployment_manifest(
+    *,
+    target: str,
+    qualification_manifest: Path,
+    rollback_manifest: Path,
+    agent_instances: list[dict[str, object]],
+) -> dict[str, object]:
+    """Build a digest-protected manifest without inspecting or mutating services."""
+
+    if target not in {"staging", "production"}:
+        raise InventoryError("deployment target must be staging or production")
+    qualification_input = qualification_manifest.expanduser()
+    rollback_input = rollback_manifest.expanduser()
+    for path, field in (
+        (qualification_input, "qualification_manifest"),
+        (rollback_input, "rollback_manifest"),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise InventoryError(f"deployment {field} must be a regular non-symlink file")
+    qualification_path = qualification_input.resolve(strict=True)
+    rollback_path = rollback_input.resolve(strict=True)
+    if not agent_instances:
+        raise InventoryError("deployment manifest requires AgentInstance entries")
+    normalized_instances: list[dict[str, object]] = []
+    for instance in agent_instances:
+        if not isinstance(instance, dict):
+            raise InventoryError("deployment AgentInstance descriptor must be an object")
+        normalized_instances.append(dict(instance))
+    manifest: dict[str, object] = {
+        "schema": DEPLOYMENT_MANIFEST_SCHEMA,
+        "target": target,
+        "qualification_manifest": str(qualification_path),
+        "rollback_manifest": str(rollback_path),
+        "agent_instances": normalized_instances,
+    }
+    manifest["manifest_digest"] = _digest(manifest)
+    return manifest
+
+
 def _git_head(path: Path) -> str:
     completed = subprocess.run(
         ("git", "rev-parse", "HEAD"),

@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from ai_agent_runtime import __version__
 from ai_agent_runtime.deployment.audit import (
     DEPLOYMENT_MANIFEST_SCHEMA,
     audit_deployment_manifest,
+    build_deployment_manifest,
 )
-from ai_agent_runtime.migration.inventory import _digest, write_json_artifact
+from ai_agent_runtime.migration.inventory import InventoryError, _digest, write_json_artifact
 
 
 def _executable(path: Path, content: bytes) -> str:
@@ -121,6 +124,62 @@ def _manifest(
     path = tmp_path / "deployment.json"
     write_json_artifact(path, material)
     return path
+
+
+def test_deployment_manifest_builder_pins_exact_inputs_without_mutation(tmp_path: Path) -> None:
+    qualification = tmp_path / "qualification.json"
+    qualification.write_text("{}\n", encoding="utf-8")
+    rollback = tmp_path / "rollback.json"
+    rollback.write_text("{}\n", encoding="utf-8")
+    instance = _instance(tmp_path)
+
+    manifest = build_deployment_manifest(
+        target="staging",
+        qualification_manifest=qualification,
+        rollback_manifest=rollback,
+        agent_instances=[instance],
+    )
+
+    assert manifest["schema"] == DEPLOYMENT_MANIFEST_SCHEMA
+    assert manifest["target"] == "staging"
+    assert manifest["qualification_manifest"] == str(qualification.resolve())
+    assert manifest["rollback_manifest"] == str(rollback.resolve())
+    assert manifest["agent_instances"] == [instance]
+    assert manifest["manifest_digest"] == _digest(
+        {key: value for key, value in manifest.items() if key != "manifest_digest"}
+    )
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_deployment_manifest_builder_rejects_unsafe_inputs(tmp_path: Path) -> None:
+    qualification = tmp_path / "qualification.json"
+    qualification.write_text("{}\n", encoding="utf-8")
+    rollback = tmp_path / "rollback.json"
+    rollback.write_text("{}\n", encoding="utf-8")
+    qualification_link = tmp_path / "qualification-link.json"
+    qualification_link.symlink_to(qualification)
+
+    with pytest.raises(InventoryError, match="target"):
+        build_deployment_manifest(
+            target="preview",
+            qualification_manifest=qualification,
+            rollback_manifest=rollback,
+            agent_instances=[_instance(tmp_path)],
+        )
+    with pytest.raises(InventoryError, match="non-symlink"):
+        build_deployment_manifest(
+            target="staging",
+            qualification_manifest=qualification_link,
+            rollback_manifest=rollback,
+            agent_instances=[{}],
+        )
+    with pytest.raises(InventoryError, match="AgentInstance"):
+        build_deployment_manifest(
+            target="staging",
+            qualification_manifest=qualification,
+            rollback_manifest=rollback,
+            agent_instances=[],
+        )
 
 
 def _verifier_for(path: Path) -> dict[str, object]:
