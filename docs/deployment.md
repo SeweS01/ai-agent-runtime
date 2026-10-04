@@ -25,6 +25,25 @@ upstream release tuple, staging evidence, and rollback manifest must be validate
 The production Telegram Agent drop-in must retain `KillMode=process` so its restart
 does not recursively destroy qualified tmux/wrapper/Codex processes.
 
+Build a wheel in CI, record its SHA-256 in the release record, and install it into a
+new side-by-side directory. The installer refuses symlinked or tampered wheels,
+unexpected digests, unsafe release roots, and any existing release ID. It never
+changes an active symlink, restarts a service, or removes an older release:
+
+```bash
+ai-agent-runtime deployment install-release \
+  --wheel /srv/releases/ai_agent_runtime-0.1.0-py3-none-any.whl \
+  --wheel-sha256 sha256:<exact-wheel-digest> \
+  --releases-root /home/devops/.local/lib/ai-agent-runtime/releases \
+  --release-id runtime-0.1.0-<git-sha> \
+  --python /usr/bin/python3.12 \
+  --output /srv/qualification/runtime-install-report.json
+```
+
+An upgrade repeats this command with a new release ID. The result is
+`INSTALLED_NOT_ACTIVATED`; activation remains a separate audited deployment step, so
+rollback can continue to reference the prior directory.
+
 Capture the effective, secret-free deployment values in a digest-protected
 `ai-agent-runtime.deployment-manifest.v1` artifact. Each `--instance` file is a
 secret-free JSON object containing one `agent_instances` entry described below.

@@ -16,6 +16,7 @@ from ai_agent_runtime.deployment.audit import (
     audit_deployment_manifest,
     build_deployment_manifest,
 )
+from ai_agent_runtime.deployment.install import install_runtime_release
 from ai_agent_runtime.health.doctor import collect_doctor_report
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
@@ -316,6 +317,28 @@ def _deployment_manifest(
     return 0
 
 
+def _deployment_install_release(
+    *,
+    wheel: str,
+    wheel_sha256: str,
+    releases_root: str,
+    release_id: str,
+    python: str,
+    output: str,
+) -> int:
+    report = install_runtime_release(
+        wheel=Path(wheel),
+        wheel_sha256=wheel_sha256,
+        releases_root=Path(releases_root),
+        release_id=release_id,
+        python=Path(python),
+    )
+    destination = Path(output).expanduser()
+    write_json_artifact(destination, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -384,6 +407,13 @@ def main() -> None:
     deployment_manifest.add_argument("--rollback-manifest", required=True)
     deployment_manifest.add_argument("--instance", action="append", default=[], required=True)
     deployment_manifest.add_argument("--output", required=True)
+    deployment_install = deployment_commands.add_parser("install-release")
+    deployment_install.add_argument("--wheel", required=True)
+    deployment_install.add_argument("--wheel-sha256", required=True)
+    deployment_install.add_argument("--releases-root", required=True)
+    deployment_install.add_argument("--release-id", required=True)
+    deployment_install.add_argument("--python", required=True)
+    deployment_install.add_argument("--output", required=True)
     deployment_audit = deployment_commands.add_parser("audit")
     deployment_audit.add_argument("--manifest", required=True)
     deployment_audit.add_argument("--output")
@@ -451,6 +481,17 @@ def main() -> None:
                         qualification_manifest=namespace.qualification_manifest,
                         rollback_manifest=namespace.rollback_manifest,
                         instances=namespace.instance,
+                        output=namespace.output,
+                    )
+                )
+            if namespace.deployment_command == "install-release":
+                raise SystemExit(
+                    _deployment_install_release(
+                        wheel=namespace.wheel,
+                        wheel_sha256=namespace.wheel_sha256,
+                        releases_root=namespace.releases_root,
+                        release_id=namespace.release_id,
+                        python=namespace.python,
                         output=namespace.output,
                     )
                 )
