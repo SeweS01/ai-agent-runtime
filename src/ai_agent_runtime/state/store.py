@@ -969,6 +969,49 @@ class RuntimeStore:
             launch_spec=launch_spec,
         )
 
+    def active_wrapper_identities(self) -> tuple[tuple[str, int, int, int, str], ...]:
+        rows = self._connection.execute(
+            """
+            SELECT instance_id, wrapper_pid, wrapper_starttime, lifecycle
+            FROM instances
+            WHERE lifecycle IN ('PROVISIONAL_STARTING', 'IDLE', 'BUSY', 'PENDING_CHANGE')
+            ORDER BY updated_at, instance_id
+            """
+        ).fetchall()
+        return tuple(
+            (
+                str(row["instance_id"]),
+                int(row["wrapper_pid"]),
+                int(row["wrapper_starttime"]),
+                int(os.getuid()),
+                str(row["lifecycle"]),
+            )
+            for row in rows
+        )
+
+    def mark_instance_wrapper_absent(
+        self,
+        *,
+        instance_id: str,
+        wrapper_pid: int,
+        wrapper_starttime: int,
+    ) -> bool:
+        with self._connection:
+            updated = self._connection.execute(
+                """
+                UPDATE instances
+                SET lifecycle=CASE
+                        WHEN lifecycle='PROVISIONAL_STARTING' THEN 'START_FAILED'
+                        ELSE 'EXITED'
+                    END,
+                    updated_at=?
+                WHERE instance_id=? AND wrapper_pid=? AND wrapper_starttime=?
+                  AND lifecycle IN ('PROVISIONAL_STARTING', 'IDLE', 'BUSY', 'PENDING_CHANGE')
+                """,
+                (time.time(), instance_id, wrapper_pid, wrapper_starttime),
+            )
+        return updated.rowcount == 1
+
     def mark_instance_exited(
         self,
         *,
@@ -1557,11 +1600,9 @@ class RuntimeStore:
             live = [
                 item
                 for item in instances
-                if item["lifecycle"] not in {"EXITED", "RETIRED_FOR_RESTART"}
+                if item["lifecycle"] in {"PROVISIONAL_STARTING", "IDLE", "BUSY", "PENDING_CHANGE"}
             ]
-            retired = [
-                item for item in instances if item["lifecycle"] == "RETIRED_FOR_RESTART"
-            ]
+            retired = [item for item in instances if item["lifecycle"] == "RETIRED_FOR_RESTART"]
             active_applied_digests = frozenset(
                 str(applied["spec_digest"])
                 for item in live

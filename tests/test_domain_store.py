@@ -1,3 +1,4 @@
+import os
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -244,6 +245,45 @@ def test_status_distinguishes_unverified_pending_and_exited_instances(tmp_path: 
     final = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
     assert final["health"] == "RUNTIME_HEALTHY"  # type: ignore[index]
     assert final["instances"][0]["lifecycle"] == "EXITED"  # type: ignore[index]
+
+
+def test_absent_provisional_wrapper_becomes_terminal_start_failure(tmp_path: Path) -> None:
+    store = RuntimeStore(tmp_path / "runtime.sqlite")
+    binding = RuntimeBinding(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        chat_id=-1001,
+        thread_id=42,
+        project_id="project-1",
+        canonical_cwd="/srv/project",
+        expected_tmux_session="cc-n1001-42",
+    )
+    store.upsert_binding(binding)
+    store.put_effective_spec(_spec(), codex_home=tmp_path, profile_fingerprint="fp")
+    store.record_instance(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        wrapper_pid=100,
+        wrapper_starttime=10,
+        child_pid=None,
+        child_starttime=None,
+        tmux_session="cc-n1001-42",
+        tmux_pane="%1",
+        lifecycle="PROVISIONAL_STARTING",
+        applied_digest=None,
+    )
+
+    assert store.active_wrapper_identities() == (
+        ("instance-1", 100, 10, os.getuid(), "PROVISIONAL_STARTING"),
+    )
+    assert store.mark_instance_wrapper_absent(
+        instance_id="instance-1",
+        wrapper_pid=100,
+        wrapper_starttime=10,
+    )
+    report = store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert report["instances"][0]["lifecycle"] == "START_FAILED"  # type: ignore[index]
+    assert report["health"] == "RUNTIME_HEALTHY"  # type: ignore[index]
 
 
 def test_retirement_candidate_survives_late_child_exit_notification(tmp_path: Path) -> None:

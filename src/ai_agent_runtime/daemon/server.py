@@ -213,6 +213,7 @@ class RuntimeServer:
         socket_identity = _socket_identity(self.config.socket_path)
         watchdog = asyncio.create_task(watchdog_loop())
         reconciler = asyncio.create_task(self._reconcile_topic_config_loop())
+        wrapper_reaper = asyncio.create_task(self._reap_absent_wrappers_loop())
         evidence_collector = asyncio.create_task(self._collect_applied_evidence_loop())
         rollout_observer = asyncio.create_task(self._observe_codex_rollouts_loop())
         retirement = (
@@ -228,6 +229,7 @@ class RuntimeServer:
             notify("STOPPING=1")
             watchdog.cancel()
             reconciler.cancel()
+            wrapper_reaper.cancel()
             evidence_collector.cancel()
             rollout_observer.cancel()
             if retirement is not None:
@@ -236,6 +238,8 @@ class RuntimeServer:
                 await watchdog
             with contextlib.suppress(asyncio.CancelledError):
                 await reconciler
+            with contextlib.suppress(asyncio.CancelledError):
+                await wrapper_reaper
             with contextlib.suppress(asyncio.CancelledError):
                 await evidence_collector
             with contextlib.suppress(asyncio.CancelledError):
@@ -1537,6 +1541,24 @@ class RuntimeServer:
             with contextlib.suppress(OSError, ValueError):
                 self._reconcile_topic_config_once()
             await asyncio.sleep(1.0)
+
+    async def _reap_absent_wrappers_loop(self) -> None:
+        while True:
+            self._reap_absent_wrappers_once()
+            await asyncio.sleep(self.evidence_interval)
+
+    def _reap_absent_wrappers_once(self) -> None:
+        for instance_id, pid, starttime, uid, _lifecycle in self.store.active_wrapper_identities():
+            try:
+                process_matches = proc_uid(pid) == uid and proc_starttime(pid) == starttime
+            except (OSError, ValueError):
+                process_matches = False
+            if not process_matches:
+                self.store.mark_instance_wrapper_absent(
+                    instance_id=instance_id,
+                    wrapper_pid=pid,
+                    wrapper_starttime=starttime,
+                )
 
     def _reconcile_topic_config_once(self) -> None:
         snapshot = read_topic_config(self.config.topic_config_path)
