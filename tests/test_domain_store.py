@@ -29,6 +29,17 @@ def test_spec_digest_is_stable_and_detects_tampering() -> None:
     assert not altered.verify_digest()
 
 
+def test_control_plane_sync_timestamp_is_durable(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.sqlite"
+    store = RuntimeStore(path)
+    assert store.control_plane_last_seen("agent-1") is None
+    assert store.mark_control_plane_sync("agent-1", observed_at=1234.5) == 1234.5
+    store.close()
+    reopened = RuntimeStore(path)
+    assert reopened.control_plane_last_seen("agent-1") == 1234.5
+    reopened.close()
+
+
 def test_store_rejects_revision_rollback_and_conflicting_digest(tmp_path: Path) -> None:
     store = RuntimeStore(tmp_path / "runtime.sqlite")
     store.upsert_binding(

@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS desired_namespaces (
     snapshot_digest TEXT,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS control_plane_sync (
+    agent_instance_id TEXT PRIMARY KEY,
+    last_seen_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS session_provenance (
     session_id TEXT PRIMARY KEY,
     binding_id TEXT NOT NULL REFERENCES bindings(binding_id),
@@ -1041,6 +1045,32 @@ class RuntimeStore:
                 "SELECT count(*) FROM outbox WHERE ack_state='PENDING'"
             ).fetchone()[0],
         }
+
+    def mark_control_plane_sync(
+        self,
+        agent_instance_id: str,
+        *,
+        observed_at: float | None = None,
+    ) -> float:
+        timestamp = time.time() if observed_at is None else observed_at
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO control_plane_sync(agent_instance_id, last_seen_at)
+                VALUES(?, ?)
+                ON CONFLICT(agent_instance_id) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at
+                """,
+                (agent_instance_id, timestamp),
+            )
+        return timestamp
+
+    def control_plane_last_seen(self, agent_instance_id: str) -> float | None:
+        row = self._connection.execute(
+            "SELECT last_seen_at FROM control_plane_sync WHERE agent_instance_id=?",
+            (agent_instance_id,),
+        ).fetchone()
+        return None if row is None else float(row["last_seen_at"])
 
     def status_report(self, agent_instance_id: str) -> dict[str, object]:
         reports: list[dict[str, object]] = []

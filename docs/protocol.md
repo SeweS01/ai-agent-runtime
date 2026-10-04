@@ -60,10 +60,19 @@ but preserves binding, instance, and session-provenance history.
 This protocol is local execution control, not a public CUS backend API. The CUS
 backend remains provider-neutral and talks through its Runtime connector.
 
+`control_plane_heartbeat` carries the exact `agent_instance_id` and refreshes a
+durable local sync lease. Successful `apply_binding` and `apply_snapshot` do the
+same. If no control-plane contact occurs within the configured bounded window,
+`status.control_plane_sync.state` becomes `DEGRADED_CUS_SYNC`; otherwise it is
+`IN_SYNC`. The degraded state never blocks a verified LKG launch and never changes
+desired state—it prevents a stale control plane from being reported as healthy.
+
 `status` returns sanitized binding source identity, project/cwd, management mode,
 desired profile/model/reasoning and revision, exact wrapper/child/tmux identities,
 verified applied revision, lifecycle, and derived health. It never returns credential
-content or transcript text.
+content or transcript text. A binding that would otherwise be `RUNTIME_HEALTHY` is
+reported as `DEGRADED_CUS_SYNC` while the control-plane lease is stale; stronger
+binding errors and pending states retain precedence.
 
 ## Durable outbox
 

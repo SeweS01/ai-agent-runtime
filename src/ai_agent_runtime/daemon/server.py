@@ -163,11 +163,10 @@ class RuntimeServer:
                 response = self._child_exited(request_id, payload, peer_pid, peer_uid)
             elif action == "heartbeat":
                 response = self._heartbeat(request_id, payload, peer_pid, peer_uid)
+            elif action == "control_plane_heartbeat":
+                response = self._control_plane_heartbeat(request_id, payload)
             elif action == "status":
-                response = self._ok(
-                    request_id,
-                    status=self.store.status_report(self.config.agent_instance_id),
-                )
+                response = self._status(request_id)
             elif action == "apply_binding":
                 response = self._apply_binding(request_id, payload)
             elif action == "apply_snapshot":
@@ -466,6 +465,7 @@ class RuntimeServer:
             codex_home=codex_home,
             profile_fingerprint=fingerprint,
         )
+        self.store.mark_control_plane_sync(agent_instance_id)
         return self._ok(
             request_id,
             binding_id=binding_id,
@@ -725,6 +725,7 @@ class RuntimeServer:
             )
         except ValueError as exc:
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
+        self.store.mark_control_plane_sync(agent_instance_id)
         return self._ok(
             request_id,
             agent_instance_id=agent_instance_id,
@@ -964,6 +965,43 @@ class RuntimeServer:
             connection_generation=connection_generation,
             resynchronized=(previous_boot_id is not None and previous_boot_id != self.boot_id),
         )
+
+    def _control_plane_heartbeat(
+        self,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        agent_instance_id = _required_str(payload, "agent_instance_id")
+        if agent_instance_id != self.config.agent_instance_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance mismatch")
+        last_seen_at = self.store.mark_control_plane_sync(agent_instance_id)
+        return self._ok(
+            request_id,
+            agent_instance_id=agent_instance_id,
+            last_seen_at=last_seen_at,
+            sync_state="IN_SYNC",
+        )
+
+    def _status(self, request_id: str) -> dict[str, Any]:
+        report = self.store.status_report(self.config.agent_instance_id)
+        last_seen_at = self.store.control_plane_last_seen(self.config.agent_instance_id)
+        now = time.time()
+        age_seconds = None if last_seen_at is None else max(0.0, now - last_seen_at)
+        in_sync = (
+            age_seconds is not None and age_seconds <= self.config.control_plane_stale_after_seconds
+        )
+        raw_bindings = report.get("bindings")
+        if isinstance(raw_bindings, list) and not in_sync:
+            for binding in raw_bindings:
+                if isinstance(binding, dict) and binding.get("health") == "RUNTIME_HEALTHY":
+                    binding["health"] = "DEGRADED_CUS_SYNC"
+        report["control_plane_sync"] = {
+            "state": "IN_SYNC" if in_sync else "DEGRADED_CUS_SYNC",
+            "last_seen_at": last_seen_at,
+            "age_seconds": age_seconds,
+            "stale_after_seconds": self.config.control_plane_stale_after_seconds,
+        }
+        return self._ok(request_id, status=report)
 
     def _child_exited(
         self,

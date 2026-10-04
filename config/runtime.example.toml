@@ -23,3 +23,4 @@ allowed_project_roots = ["/home/devops/workspace"]
 # deterministic queue/paste/turn retirement race matrix.
 retirement_enabled = false
 retirement_qualification_report_id = ""
+control_plane_stale_after_seconds = 60

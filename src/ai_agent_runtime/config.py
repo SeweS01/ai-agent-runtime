@@ -39,6 +39,7 @@ class RuntimeConfig:
     allowed_project_roots: tuple[Path, ...] = ()
     retirement_enabled: bool = False
     retirement_qualification_report_id: str = ""
+    control_plane_stale_after_seconds: float = 60.0
 
     @classmethod
     def defaults(cls) -> RuntimeConfig:
@@ -63,6 +64,7 @@ class RuntimeConfig:
             allowed_project_roots=(),
             retirement_enabled=False,
             retirement_qualification_report_id="",
+            control_plane_stale_after_seconds=60.0,
         )
 
     @classmethod
@@ -101,6 +103,9 @@ class RuntimeConfig:
             retirement_qualification_report_id=str(
                 policy.get("retirement_qualification_report_id", "")
             ),
+            control_plane_stale_after_seconds=float(
+                policy.get("control_plane_stale_after_seconds", 60.0)
+            ),
         )
 
     def validate(self) -> None:
@@ -136,6 +141,8 @@ class RuntimeConfig:
             raise ValueError(
                 "policy.retirement_qualification_report_id is required when retirement is enabled"
             )
+        if not 5.0 <= self.control_plane_stale_after_seconds <= 3600.0:
+            raise ValueError("policy.control_plane_stale_after_seconds must be between 5 and 3600")
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:

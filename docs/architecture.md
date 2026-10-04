@@ -35,10 +35,15 @@ development/operator convenience, not the production namespace mechanism.
 
 - CUS owns authoritative desired generation/revision/digest.
 - Runtime owns verified local effective specs, process evidence, session provenance,
-  and the durable outbox.
+  the durable outbox, and a bounded last-control-plane-contact lease.
 - Telegram Agent owns its topic configuration and tmux state. Runtime is an
   independent file writer, so updates use eventual reconciliation rather than a
   false cross-process transaction guarantee.
+
+CUS availability is not in the wrapper startup path. CUS sends a namespaced local
+heartbeat during periodic reconciliation, and every successful desired-state apply
+also refreshes the same durable lease. Lease expiry changes observability to
+`DEGRADED_CUS_SYNC` but deliberately leaves verified LKG execution available.
 
 ## Codex rollout observation
 

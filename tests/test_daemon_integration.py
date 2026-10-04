@@ -262,6 +262,25 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     )
     instance_status = status["status"]["bindings"][0]["instances"][0]
     assert instance_status["lifecycle"] == "EXITED"
+    assert status["status"]["control_plane_sync"]["state"] == "DEGRADED_CUS_SYNC"
+    assert status["status"]["bindings"][0]["health"] == "DEGRADED_CUS_SYNC"
+
+    control_plane = await request(
+        config.socket_path,
+        versioned(
+            "control_plane_heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+        ),
+    )
+    assert control_plane["ok"] is True
+    assert control_plane["sync_state"] == "IN_SYNC"
+    synced_status = await request(
+        config.socket_path,
+        versioned("status", str(uuid.uuid4())),
+    )
+    assert synced_status["status"]["control_plane_sync"]["state"] == "IN_SYNC"
+    assert synced_status["status"]["bindings"][0]["health"] == "RUNTIME_HEALTHY"
 
     topic_config.write_text(
         json.dumps(
