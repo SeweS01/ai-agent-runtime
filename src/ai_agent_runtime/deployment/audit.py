@@ -215,6 +215,7 @@ def audit_deployment_manifest(
         errors.append("deployment_manifest_schema_mismatch")
     expected_manifest_fields = {
         "schema",
+        "target",
         "qualification_manifest",
         "rollback_manifest",
         "agent_instances",
@@ -229,13 +230,28 @@ def audit_deployment_manifest(
     qualification_path = _absolute_file(
         manifest.get("qualification_manifest"), "qualification_manifest"
     )
+    target = manifest.get("target")
+    if target not in {"staging", "production"}:
+        errors.append("deployment_target_invalid")
     try:
         qualification = qualification_verifier(qualification_path)
     except (InventoryError, OSError, ValueError) as exc:
         qualification = {"accepted": False, "release_tuple": {}}
         errors.append(f"qualification_unreadable:{type(exc).__name__}")
-    if qualification.get("accepted") is not True:
+    qualification_errors = qualification.get("errors")
+    missing_only = (
+        isinstance(qualification_errors, list)
+        and bool(qualification_errors)
+        and all(
+            isinstance(item, str) and item.endswith(":evidence_missing")
+            for item in qualification_errors
+        )
+    )
+    qualification_prepared = qualification.get("accepted") is True or missing_only
+    if target == "production" and qualification.get("accepted") is not True:
         errors.append("release_not_qualified")
+    elif target == "staging" and not qualification_prepared:
+        errors.append("qualification_manifest_not_prepared")
     tuple_value = qualification.get("release_tuple")
     tuple_data = tuple_value if isinstance(tuple_value, dict) else {}
     if tuple_data.get("runtime_release") != __version__:
@@ -295,8 +311,13 @@ def audit_deployment_manifest(
             "control_period_active": rollback.get("control_period_active"),
             "accepted": rollback.get("accepted") is True,
         },
+        "target": target,
         "accepted": not errors,
-        "status": "READY_FOR_STAGING" if not errors else "BLOCKED",
+        "status": (
+            f"READY_FOR_{str(target).upper()}"
+            if not errors and target in {"staging", "production"}
+            else "BLOCKED"
+        ),
         "instances": instances,
         "errors": errors,
         "mutations_performed": False,

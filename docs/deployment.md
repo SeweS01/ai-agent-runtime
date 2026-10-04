@@ -34,10 +34,15 @@ ai-agent-runtime deployment audit \
   --output /srv/qualification/deployment-audit.json
 ```
 
-The deployment manifest pins both `qualification_manifest` and
-`rollback_manifest`. The audit refuses staging unless all release gates pass and the
-rollback verifier confirms that the exact legacy inputs are unchanged and their
-declared control period is still active.
+The deployment manifest has an explicit `target` (`staging` or `production`) and
+pins both `qualification_manifest` and `rollback_manifest`. For `staging`, the
+qualification manifest must be structurally valid and bound to the exact tuple, but
+its only permitted errors are missing evidence gates: those are the tests staging is
+being created to run. Existing invalid/tampered evidence still blocks deployment.
+For `production`, every gate must already be `QUALIFIED`. Both targets require the
+rollback verifier to confirm that the exact legacy inputs are unchanged and their
+declared control period is active. This separation prevents a cyclic requirement to
+produce real staging evidence before a staging instance can exist.
 
 Each `agent_instances` entry identifies its Runtime config, exact Telegram checkout,
 instance-named wrapper, forum chat and one-way working-bot token fingerprint. It also

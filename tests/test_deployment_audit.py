@@ -100,13 +100,19 @@ def _qualified() -> dict[str, object]:
     }
 
 
-def _manifest(tmp_path: Path, instances: list[dict]) -> Path:
+def _manifest(
+    tmp_path: Path,
+    instances: list[dict],
+    *,
+    target: str = "staging",
+) -> Path:
     qualification = tmp_path / "qualification.json"
     qualification.write_text("{}\n", encoding="utf-8")
     rollback = tmp_path / "rollback.json"
     rollback.write_text("{}\n", encoding="utf-8")
     material: dict[str, object] = {
         "schema": DEPLOYMENT_MANIFEST_SCHEMA,
+        "target": target,
         "qualification_manifest": str(qualification),
         "rollback_manifest": str(rollback),
         "agent_instances": instances,
@@ -170,7 +176,7 @@ def test_deployment_audit_blocks_duplicate_forum_and_unsafe_systemd(tmp_path: Pa
 
 
 def test_deployment_audit_blocks_unqualified_release(tmp_path: Path) -> None:
-    path = _manifest(tmp_path, [_instance(tmp_path)])
+    path = _manifest(tmp_path, [_instance(tmp_path)], target="production")
 
     def blocked(_path: Path) -> dict[str, object]:
         result = _verifier_for(_path)
@@ -185,6 +191,58 @@ def test_deployment_audit_blocks_unqualified_release(tmp_path: Path) -> None:
     )
     assert report["accepted"] is False
     assert "release_not_qualified" in report["errors"]
+
+
+def test_staging_audit_accepts_intact_tuple_with_only_real_evidence_missing(
+    tmp_path: Path,
+) -> None:
+    path = _manifest(tmp_path, [_instance(tmp_path)], target="staging")
+
+    def prepared(_path: Path) -> dict[str, object]:
+        result = _verifier_for(_path)
+        result.update(
+            {
+                "accepted": False,
+                "errors": [
+                    "real_codex_launch:evidence_missing",
+                    "telegram_e2e:evidence_missing",
+                ],
+            }
+        )
+        return result
+
+    report = audit_deployment_manifest(
+        path,
+        qualification_verifier=prepared,
+        rollback_verifier=_rollback_verified,
+        git_head_reader=lambda _path: "0" * 40,
+    )
+    assert report["accepted"] is True
+    assert report["status"] == "READY_FOR_STAGING"
+    assert report["target"] == "staging"
+
+
+def test_staging_audit_rejects_invalid_existing_evidence(tmp_path: Path) -> None:
+    path = _manifest(tmp_path, [_instance(tmp_path)], target="staging")
+
+    def invalid(_path: Path) -> dict[str, object]:
+        result = _verifier_for(_path)
+        result.update(
+            {
+                "accepted": False,
+                "errors": ["upstream_source_contract:artifact_digest_mismatch"],
+            }
+        )
+        return result
+
+    report = audit_deployment_manifest(
+        path,
+        qualification_verifier=invalid,
+        rollback_verifier=_rollback_verified,
+        git_head_reader=lambda _path: "0" * 40,
+    )
+    assert report["accepted"] is False
+    assert "qualification_manifest_not_prepared" in report["errors"]
 
 
 def test_deployment_audit_blocks_unverified_rollback_path(tmp_path: Path) -> None:
