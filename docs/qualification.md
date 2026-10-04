@@ -124,3 +124,19 @@ credential paths, performs no copy/link/delete, and creates a `0600` artifact wi
 overwrite. Any cross-profile or pre-existing-target path collision blocks the
 candidate. A collision-free manifest remains `qualified=false`: real start/resume,
 archive/index/state, concurrent-account and rollback tests are still mandatory.
+
+After reviewing that manifest, stage its exact files into a fresh candidate root:
+
+```bash
+ai-agent-runtime storage stage \
+  --manifest /var/lib/ai-agent-runtime/migration/session-storage.json \
+  --output /var/lib/ai-agent-runtime/migration/session-storage-stage.json
+```
+
+Staging re-hashes every source before and after the copy, rejects any symlink or
+file/directory collision, copies through no-follow file descriptors, publishes only
+to a previously absent target, and verifies the complete staged file inventory.
+Source profiles are not renamed, linked, modified, or removed. The resulting status
+is `STAGED_NOT_ACTIVATED`: this command deliberately does not switch `CODEX_HOME`,
+create shared-session links, or claim lifecycle qualification. Activation topology
+remains a pinned-Codex qualification result, not an installer assumption.

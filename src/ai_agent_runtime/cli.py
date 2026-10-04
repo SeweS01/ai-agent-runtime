@@ -25,7 +25,10 @@ from ai_agent_runtime.migration.inventory import (
     write_inventory,
     write_json_artifact,
 )
-from ai_agent_runtime.migration.session_storage import build_session_storage_manifest
+from ai_agent_runtime.migration.session_storage import (
+    build_session_storage_manifest,
+    stage_session_storage,
+)
 from ai_agent_runtime.qualification.release_gate import (
     build_qualification_manifest,
     verify_qualification_manifest,
@@ -154,6 +157,26 @@ def _storage_manifest(
     return 0 if not manifest["collisions"] else 1
 
 
+def _storage_stage(*, manifest: str, output: str) -> int:
+    target = Path(output).expanduser()
+    if target.exists() or target.is_symlink():
+        raise InventoryError(f"refusing to overwrite stage report: {target}")
+    report = stage_session_storage(Path(manifest).expanduser())
+    write_json_artifact(target, report)
+    print(
+        json.dumps(
+            {
+                "output": str(target),
+                "status": report["status"],
+                "stage_digest": report["stage_digest"],
+                "activation_performed": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _read_release_tuple(path: str) -> dict[str, object]:
     source = Path(path).expanduser()
     try:
@@ -237,6 +260,9 @@ def main() -> None:
     storage_manifest.add_argument("--shared-root", required=True)
     storage_manifest.add_argument("--include-relative", action="append", default=[])
     storage_manifest.add_argument("--output", required=True)
+    storage_stage = storage_commands.add_parser("stage")
+    storage_stage.add_argument("--manifest", required=True)
+    storage_stage.add_argument("--output", required=True)
     qualification = commands.add_parser("qualification")
     qualification_commands = qualification.add_subparsers(
         dest="qualification_command", required=True
@@ -281,6 +307,13 @@ def main() -> None:
                     profiles=namespace.profile,
                     shared_root=namespace.shared_root,
                     includes=namespace.include_relative,
+                    output=namespace.output,
+                )
+            )
+        if namespace.command == "storage" and namespace.storage_command == "stage":
+            raise SystemExit(
+                _storage_stage(
+                    manifest=namespace.manifest,
                     output=namespace.output,
                 )
             )

@@ -106,3 +106,8 @@ versioned `cus-runtime-migration-import` tool. Run that tool without `--commit` 
 only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends one
 authoritative Runtime snapshot, keeping non-Codex entries explicitly `UNMANAGED`
 instead of rewriting their Telegram Agent engine.
+
+Session-storage candidates follow a separate manifest-and-stage workflow documented
+in `qualification.md`. Staging is copy-only and does not activate a topology; no
+deployment script may replace a non-empty profile directory with a symlink or delete
+the original data.
