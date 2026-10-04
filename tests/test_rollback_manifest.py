@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_agent_runtime.migration import rollback as rollback_module
 from ai_agent_runtime.migration.inventory import InventoryError, write_json_artifact
 from ai_agent_runtime.migration.rollback import (
     build_rollback_manifest,
@@ -45,6 +46,31 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, dict[str, Path]]:
     unit.parent.mkdir()
     unit.write_text("[Service]\nExecStart=/opt/legacy-agent\n", encoding="utf-8")
     return repo, binary, {"legacy_service_unit": unit}
+
+
+def test_git_inspection_uses_only_command_local_safe_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "root-owned-release-source"
+    observed: list[str] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.extend(command)
+        return subprocess.CompletedProcess(command, 0, stdout="verified\n", stderr="")
+
+    monkeypatch.setattr(rollback_module.subprocess, "run", fake_run)
+
+    assert rollback_module._run_git(repo, "rev-parse", "HEAD") == "verified"
+    assert observed == [
+        "git",
+        "-c",
+        f"safe.directory={repo}",
+        "-C",
+        str(repo),
+        "rev-parse",
+        "HEAD",
+    ]
 
 
 def test_manifest_pins_clean_legacy_path_without_exposing_remote_secret(tmp_path: Path) -> None:

@@ -286,6 +286,9 @@ The Git origin is stored only as a fingerprint because remote URLs can contain
 credentials. Secret-shaped paths, symlinks, dirty tracked worktrees, tampered files,
 and changed Git commits fail closed. `VERIFIED_NOT_DRILLED` means the inputs still
 exist unchanged; it is not rollback-drill evidence and does not authorize a restore.
+An immutable release checkout may be owned by root; Git inspection uses a command-local
+`safe.directory` value for that one already validated absolute worktree path and never
+modifies global or repository Git configuration.
 
 The private GitHub repository, local legacy checkout, overlay, old virtual
 environment, and server files remain protected rollback inputs until all of the

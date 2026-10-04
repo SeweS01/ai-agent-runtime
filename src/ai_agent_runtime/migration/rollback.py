@@ -41,7 +41,7 @@ _FORBIDDEN_SUFFIXES: Final = {".key", ".pem", ".p12", ".pfx"}
 def _run_git(repo: Path, *args: str) -> str:
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            ["git", "-c", f"safe.directory={repo}", "-C", str(repo), *args],
             check=False,
             capture_output=True,
             text=True,
