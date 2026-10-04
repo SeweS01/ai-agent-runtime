@@ -24,7 +24,10 @@ from ai_agent_runtime.deployment.prepare import prepare_instance_links
 from ai_agent_runtime.health.doctor import collect_doctor_report
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
-from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
+from ai_agent_runtime.migration.binding_plan import (
+    build_binding_migration_plan,
+    read_binding_migration_plan,
+)
 from ai_agent_runtime.migration.inventory import (
     InventoryError,
     build_inventory,
@@ -36,6 +39,10 @@ from ai_agent_runtime.migration.inventory import (
 from ai_agent_runtime.migration.rollback import (
     build_rollback_manifest,
     verify_rollback_manifest,
+)
+from ai_agent_runtime.migration.session_provenance import (
+    build_session_provenance_plan,
+    read_session_provenance_plan,
 )
 from ai_agent_runtime.migration.session_storage import (
     build_session_storage_manifest,
@@ -134,6 +141,52 @@ def _inventory_plan_bindings(*, inventory: str, generation_id: str, output: str)
         )
     )
     return 0 if plan["accepted"] else 1
+
+
+def _inventory_plan_session_provenance(
+    *,
+    inventory: str,
+    binding_plan: str,
+    output: str,
+) -> int:
+    plan = build_session_provenance_plan(
+        read_inventory(Path(inventory).expanduser()),
+        read_binding_migration_plan(Path(binding_plan).expanduser()),
+    )
+    target = Path(output).expanduser()
+    write_json_artifact(target, plan)
+    blockers = plan.get("blockers")
+    if not isinstance(blockers, list):
+        raise InventoryError("session provenance plan blockers are malformed")
+    print(
+        json.dumps(
+            {
+                "output": str(target),
+                "plan_digest": plan["plan_digest"],
+                "accepted": plan["accepted"],
+                "record_count": plan["record_count"],
+                "blocker_count": len(blockers),
+                "mutations_performed": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if plan["accepted"] else 1
+
+
+async def _provenance_import(config: RuntimeConfig, *, plan_path: str) -> int:
+    plan = read_session_provenance_plan(Path(plan_path).expanduser())
+    digest = str(plan["plan_digest"])
+    response = await request(
+        config.socket_path,
+        versioned(
+            "import_session_provenance",
+            f"provenance-import:{digest.removeprefix('sha256:')}",
+            plan=plan,
+        ),
+    )
+    print(json.dumps(response, indent=2, sort_keys=True))
+    return 0 if response.get("ok") else 1
 
 
 def _parse_profiles(values: list[str]) -> dict[str, Path]:
@@ -448,6 +501,16 @@ def main() -> None:
     inventory_plan.add_argument("--inventory", required=True)
     inventory_plan.add_argument("--generation-id", required=True)
     inventory_plan.add_argument("--output", required=True)
+    provenance_plan = inventory_commands.add_parser("plan-session-provenance")
+    provenance_plan.add_argument("--inventory", required=True)
+    provenance_plan.add_argument("--binding-plan", required=True)
+    provenance_plan.add_argument("--output", required=True)
+    provenance = commands.add_parser("provenance")
+    provenance_commands = provenance.add_subparsers(
+        dest="provenance_command", required=True
+    )
+    provenance_import = provenance_commands.add_parser("import")
+    provenance_import.add_argument("--plan", required=True)
     storage = commands.add_parser("storage")
     storage_commands = storage.add_subparsers(dest="storage_command", required=True)
     storage_manifest = storage_commands.add_parser("manifest")
@@ -654,6 +717,14 @@ def main() -> None:
                         output=namespace.output,
                     )
                 )
+            if namespace.inventory_command == "plan-session-provenance":
+                raise SystemExit(
+                    _inventory_plan_session_provenance(
+                        inventory=namespace.inventory,
+                        binding_plan=namespace.binding_plan,
+                        output=namespace.output,
+                    )
+                )
         config = _load_config(namespace.config)
         if namespace.command == "serve":
             asyncio.run(RuntimeServer(config).serve())
@@ -664,6 +735,10 @@ def main() -> None:
             raise SystemExit(_local_summary(config))
         if namespace.command == "doctor":
             raise SystemExit(asyncio.run(_doctor(config)))
+        if namespace.command == "provenance" and namespace.provenance_command == "import":
+            raise SystemExit(
+                asyncio.run(_provenance_import(config, plan_path=namespace.plan))
+            )
         if namespace.command == "inventory" and namespace.inventory_command == "export":
             raise SystemExit(
                 _inventory_export(

@@ -31,6 +31,10 @@ from ai_agent_runtime.domain import (
 )
 from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 from ai_agent_runtime.ipc.protocol import read_frame, validate_version, versioned, write_frame
+from ai_agent_runtime.migration.session_provenance import (
+    inspect_rollout_session,
+    validate_session_provenance_plan,
+)
 from ai_agent_runtime.process_safety import (
     file_sha256,
     process_executable_evidence,
@@ -218,6 +222,8 @@ class RuntimeServer:
                 response = self._apply_binding(request_id, payload)
             elif action == "apply_snapshot":
                 response = self._apply_snapshot(request_id, payload)
+            elif action == "import_session_provenance":
+                response = self._import_session_provenance(request_id, payload)
             elif action == "outbox_pull":
                 limit = payload.get("limit", 50)
                 if not isinstance(limit, int):
@@ -838,6 +844,143 @@ class RuntimeServer:
             project_relocations=sorted(
                 str(relocation["relocation_id"]) for relocation in relocations
             ),
+        )
+
+    def _import_session_provenance(
+        self,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan = validate_session_provenance_plan(payload.get("plan"))
+        agent_instance_id = _required_str(plan, "agent_instance_id")
+        if agent_instance_id != self.config.agent_instance_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance mismatch")
+        raw_records = plan.get("records")
+        if not isinstance(raw_records, list) or len(raw_records) > 1000:
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "session provenance records must be a bounded array",
+            )
+
+        normalized: list[dict[str, object]] = []
+        session_ids: set[str] = set()
+        for raw_record in raw_records:
+            if not isinstance(raw_record, dict):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance record must be an object",
+                )
+            if set(raw_record) != {
+                "agent_instance_id",
+                "source_ref",
+                "binding_id",
+                "account_profile",
+                "canonical_cwd",
+                "session_id",
+                "rollout_path",
+                "rollout_device",
+                "rollout_inode",
+                "rollout_size",
+            }:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance record fields mismatch",
+                )
+            record = dict(raw_record)
+            record_agent = _required_str(record, "agent_instance_id")
+            binding_id = _required_str(record, "binding_id")
+            source_ref = _required_str(record, "source_ref")
+            account_profile = _required_str(record, "account_profile")
+            canonical_cwd = _required_str(record, "canonical_cwd")
+            session_id = _required_str(record, "session_id")
+            rollout_path = _required_str(record, "rollout_path")
+            if any(
+                len(value) > maximum or "\x00" in value or "\n" in value or "\r" in value
+                for value, maximum in (
+                    (record_agent, 64),
+                    (source_ref, 1024),
+                    (binding_id, 128),
+                    (account_profile, 128),
+                    (canonical_cwd, 4096),
+                    (session_id, 512),
+                    (rollout_path, 4096),
+                )
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance record string is invalid",
+                )
+            if any(
+                isinstance(record[field], bool)
+                for field in ("rollout_device", "rollout_inode", "rollout_size")
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance rollout identity is invalid",
+                )
+            rollout_device = _required_int(record, "rollout_device")
+            rollout_inode = _required_int(record, "rollout_inode")
+            rollout_size = _required_int(record, "rollout_size")
+            if (
+                record_agent != agent_instance_id
+                or rollout_device < 0
+                or rollout_inode <= 0
+                or rollout_size < 0
+                or session_id in session_ids
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance record identity is invalid",
+                )
+            session_ids.add(session_id)
+            binding = self.store.get_binding(binding_id)
+            if binding is None or not binding.configured:
+                raise RuntimeFailureError(
+                    ErrorCode.UNKNOWN_BINDING,
+                    "session provenance binding is not configured",
+                )
+            expected_source_ref = (
+                f"{binding.agent_instance_id}/{binding.chat_id}/{binding.thread_id}"
+            )
+            if (
+                binding.agent_instance_id != agent_instance_id
+                or source_ref != expected_source_ref
+                or canonical_cwd != binding.canonical_cwd
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance binding identity mismatch",
+                )
+            effective = self.store.get_effective_spec(binding_id)
+            if effective is None or effective[0].account_profile != account_profile:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance account does not match effective spec",
+                )
+            observed = inspect_rollout_session(
+                Path(rollout_path),
+                expected_session_id=session_id,
+                expected_cwd=canonical_cwd,
+            )
+            if observed != {
+                "rollout_path": rollout_path,
+                "rollout_device": rollout_device,
+                "rollout_inode": rollout_inode,
+                "rollout_size": rollout_size,
+            }:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance rollout evidence changed after planning",
+                )
+            normalized.append(record)
+
+        imported = self.store.import_session_provenance(tuple(normalized))
+        return self._ok(
+            request_id,
+            agent_instance_id=agent_instance_id,
+            plan_digest=plan["plan_digest"],
+            imported=imported,
+            total=len(normalized),
         )
 
     def _validate_project_relocations(

@@ -185,6 +185,13 @@ is `STAGED_NOT_ACTIVATED`: this command deliberately does not switch `CODEX_HOME
 create shared-session links, or claim lifecycle qualification. Activation topology
 remains a pinned-Codex qualification result, not an installer assumption.
 
+Once that topology is selected for a migration rehearsal, regenerate the M0
+inventory and the digest-bound session-provenance plan described in `deployment.md`.
+The same-binding `/resume` gate must prove both an imported pre-cutover current
+session and a session created natively after Runtime launch. Any changed rollout
+path/device/inode after planning must make the import fail closed; an unproven older
+picker entry must also fail closed rather than being assigned by cwd.
+
 ## Rollback preservation versus rollback qualification
 
 Create and verify the legacy rollback manifest described in `deployment.md` before

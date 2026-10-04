@@ -203,6 +203,34 @@ only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends o
 authoritative Runtime snapshot, keeping non-Codex entries explicitly `UNMANAGED`
 instead of rewriting their Telegram Agent engine.
 
+After that authoritative snapshot exists in Runtime, create a separate provenance
+plan for the exact Codex sessions named by the pre-cutover upstream tmux state. Do
+this only after the qualified session-storage topology and rollout paths are final:
+
+```bash
+ai-agent-runtime inventory plan-session-provenance \
+  --inventory /var/lib/ai-agent-runtime/migration/pre-cutover.json \
+  --binding-plan /var/lib/ai-agent-runtime/migration/binding-plan.json \
+  --output /var/lib/ai-agent-runtime/migration/session-provenance-plan.json
+
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml provenance import \
+  --plan /var/lib/ai-agent-runtime/migration/session-provenance-plan.json
+```
+
+Planning is read-only. It accepts a session only when the inventory and binding-plan
+digests match, the binding is `READY`, upstream state provides one session ID and
+rollout path, and the owned rollout's first `session_meta` record proves that exact
+session ID and canonical cwd. It records only path/device/inode/size metadata, never
+prompt or transcript content. Import re-opens every rollout and requires unchanged
+filesystem identity before atomically inserting immutable binding/account ownership;
+repeating the same digest-bound import is idempotent.
+
+This migration deliberately covers only sessions whose topic ownership is proven by
+the exact upstream state at inventory time. Older picker entries without such proof
+are preserved on disk but are not guessed from cwd or account; they remain
+fail-closed for `/resume`. Regenerate both inventory and provenance plan if upstream
+state or the session-storage topology changes before cutover.
+
 The same inventory command is the M1 shadow-mode observer when it runs before the
 `TELEGRAM_CODEX_BIN` switch. Every topic receives one conservative confidence:
 

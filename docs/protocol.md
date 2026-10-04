@@ -76,6 +76,17 @@ change, effective specs, binding paths, and durable alias/history record commit 
 one operation. Omitting this record, relocating only part of a Project, or reusing an
 ID with different data fails closed.
 
+`import_session_provenance` accepts only an already-reviewed
+`ai-agent-runtime.session-provenance-plan.v1` artifact after the authoritative
+binding snapshot has been applied. The plan is self-digested and bound to exact
+inventory and binding-plan digests. Runtime independently checks AgentInstance,
+source ref, configured binding, canonical cwd and effective account, then re-opens
+each rollout with no-follow semantics and revalidates its first `session_meta` plus
+path/device/inode/size. All ownership rows are inserted in one transaction. Existing
+identical rows are no-ops; changing an existing session owner or rollout identity is
+rejected. The CLI derives a stable request ID from the plan digest, so lost-ACK retry
+uses the normal durable request-result cache.
+
 This protocol is local execution control, not a public CUS backend API. The CUS
 backend remains provider-neutral and talks through its Runtime connector.
 

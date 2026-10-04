@@ -1372,6 +1372,96 @@ class RuntimeStore:
                 ),
             )
 
+    def import_session_provenance(
+        self,
+        records: tuple[dict[str, object], ...],
+    ) -> int:
+        """Atomically import pre-cutover ownership after external evidence validation."""
+
+        imported = 0
+        with self._connection:
+            for record in records:
+                session_id = str(record["session_id"])
+                binding_id = str(record["binding_id"])
+                account_profile = str(record["account_profile"])
+                canonical_cwd = str(record["canonical_cwd"])
+                rollout_path = str(record["rollout_path"])
+                raw_rollout_device = record["rollout_device"]
+                raw_rollout_inode = record["rollout_inode"]
+                if (
+                    not isinstance(raw_rollout_device, int)
+                    or isinstance(raw_rollout_device, bool)
+                    or not isinstance(raw_rollout_inode, int)
+                    or isinstance(raw_rollout_inode, bool)
+                ):
+                    raise ValueError("session provenance rollout identity is invalid")
+                rollout_device = raw_rollout_device
+                rollout_inode = raw_rollout_inode
+                binding = self._connection.execute(
+                    """
+                    SELECT b.canonical_cwd, b.configured, e.payload_json
+                    FROM bindings AS b
+                    LEFT JOIN effective_specs AS e ON e.binding_id=b.binding_id
+                    WHERE b.binding_id=?
+                    """,
+                    (binding_id,),
+                ).fetchone()
+                if binding is None or not bool(binding["configured"]):
+                    raise ValueError("session provenance binding is not configured")
+                if binding["canonical_cwd"] != canonical_cwd or binding["payload_json"] is None:
+                    raise ValueError("session provenance binding cwd/spec mismatch")
+                desired = json.loads(binding["payload_json"])
+                if (
+                    not isinstance(desired, dict)
+                    or desired.get("account_profile") != account_profile
+                ):
+                    raise ValueError("session provenance account does not match effective spec")
+                existing = self._connection.execute(
+                    """
+                    SELECT binding_id, account_profile, rollout_path,
+                           rollout_device, rollout_inode
+                    FROM session_provenance WHERE session_id=?
+                    """,
+                    (session_id,),
+                ).fetchone()
+                expected = (
+                    binding_id,
+                    account_profile,
+                    rollout_path,
+                    rollout_device,
+                    rollout_inode,
+                )
+                if existing is not None:
+                    observed = (
+                        str(existing["binding_id"]),
+                        str(existing["account_profile"]),
+                        str(existing["rollout_path"]),
+                        int(existing["rollout_device"]),
+                        int(existing["rollout_inode"]),
+                    )
+                    if observed != expected:
+                        raise ValueError("session provenance is immutable")
+                    continue
+                self._connection.execute(
+                    """
+                    INSERT INTO session_provenance(
+                        session_id, binding_id, account_profile, rollout_path,
+                        rollout_device, rollout_inode, observed_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        binding_id,
+                        account_profile,
+                        rollout_path,
+                        rollout_device,
+                        rollout_inode,
+                        time.time(),
+                    ),
+                )
+                imported += 1
+        return imported
+
     def summary(self) -> dict[str, int]:
         return {
             "bindings": self._connection.execute("SELECT count(*) FROM bindings").fetchone()[0],

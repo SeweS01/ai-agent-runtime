@@ -4,12 +4,32 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
+from pathlib import Path
 from typing import cast
 
 from ai_agent_runtime.domain import sha256_digest
-from ai_agent_runtime.migration.inventory import INVENTORY_SCHEMA, InventoryError, _digest
+from ai_agent_runtime.migration.inventory import (
+    INVENTORY_SCHEMA,
+    InventoryError,
+    _digest,
+    _read_json_object,
+)
 
 BINDING_PLAN_SCHEMA = "ai-agent-runtime.binding-migration-plan.v1"
+
+
+def read_binding_migration_plan(path: Path) -> dict[str, object]:
+    payload, _sha256 = _read_json_object(path)
+    if payload.get("schema") != BINDING_PLAN_SCHEMA:
+        raise InventoryError("unsupported binding migration plan schema")
+    supplied = payload.get("plan_digest")
+    if not isinstance(supplied, str):
+        raise InventoryError("binding migration plan digest is missing")
+    unsigned = dict(payload)
+    unsigned.pop("plan_digest", None)
+    if supplied != _digest(unsigned):
+        raise InventoryError("binding migration plan digest verification failed")
+    return payload
 
 
 def _stable_id(prefix: str, value: str) -> str:
