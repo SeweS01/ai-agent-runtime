@@ -286,6 +286,9 @@ The Git origin is stored only as a fingerprint because remote URLs can contain
 credentials. Secret-shaped paths, symlinks, dirty tracked worktrees, tampered files,
 and changed Git commits fail closed. `VERIFIED_NOT_DRILLED` means the inputs still
 exist unchanged; it is not rollback-drill evidence and does not authorize a restore.
+The reserved `legacy_codex_bin` input may be the actual launcher symlink: its link
+inode/target and the resolved regular binary inode/digest are both pinned. Symlinks
+remain forbidden for every operator-supplied additional artifact.
 An immutable release checkout may be owned by root; Git inspection uses a command-local
 `safe.directory` value for that one already validated absolute worktree path and never
 modifies global or repository Git configuration.

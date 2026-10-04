@@ -142,12 +142,35 @@ def test_manifest_rejects_secret_artifacts_symlinks_and_past_period(tmp_path: Pa
 
     link = tmp_path / "legacy-link"
     link.symlink_to(binary)
+    linked_manifest = build_rollback_manifest(
+        legacy_repo=repo,
+        legacy_service="legacy.service",
+        legacy_codex_bin=link,
+        artifacts=artifacts,
+        control_period_end="2099-01-01T00:00:00Z",
+    )
+    linked_records = linked_manifest["artifacts"]
+    assert linked_records[0]["type"] == "symlink"
+    assert linked_records[0]["link_target"] == str(binary)
+    assert linked_records[0]["resolved_path"] == str(binary)
+    linked_path = tmp_path / "linked-rollback.json"
+    write_json_artifact(linked_path, linked_manifest)
+    replacement = tmp_path / "bin" / "replacement"
+    replacement.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    link.unlink()
+    link.symlink_to(replacement)
+    linked_report = verify_rollback_manifest(linked_path)
+    assert linked_report["accepted"] is False
+    assert any("legacy_codex_bin" in failure for failure in linked_report["failures"])
+
+    artifact_link = tmp_path / "unit-link"
+    artifact_link.symlink_to(artifacts["legacy_service_unit"])
     with pytest.raises(InventoryError, match="non-symlink"):
         build_rollback_manifest(
             legacy_repo=repo,
             legacy_service="legacy.service",
-            legacy_codex_bin=link,
-            artifacts=artifacts,
+            legacy_codex_bin=binary,
+            artifacts={"linked_unit": artifact_link},
             control_period_end="2099-01-01T00:00:00Z",
         )
 

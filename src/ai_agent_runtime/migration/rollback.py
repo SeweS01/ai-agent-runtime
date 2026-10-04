@@ -114,9 +114,76 @@ def _file_digest(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _artifact_record(name: str, path: Path) -> dict[str, object]:
+def _symlink_artifact_record(name: str, path: Path) -> dict[str, object]:
+    link_before = path.lstat()
+    if not stat.S_ISLNK(link_before.st_mode):
+        raise InventoryError("rollback launcher path is not a symlink")
+    link_target = os.readlink(path)
+    resolved = path.resolve(strict=True)
+    target = _safe_artifact_path(resolved)
+    target_before = target.stat()
+    digest = _file_digest(target)
+    target_after = target.stat()
+    link_after = path.lstat()
+    if (
+        os.readlink(path) != link_target
+        or (link_before.st_dev, link_before.st_ino, link_before.st_mtime_ns)
+        != (link_after.st_dev, link_after.st_ino, link_after.st_mtime_ns)
+        or (
+            target_before.st_dev,
+            target_before.st_ino,
+            target_before.st_size,
+            target_before.st_mtime_ns,
+        )
+        != (
+            target_after.st_dev,
+            target_after.st_ino,
+            target_after.st_size,
+            target_after.st_mtime_ns,
+        )
+    ):
+        raise InventoryError("rollback launcher symlink changed while hashing")
+    return {
+        "name": name,
+        "path": str(path),
+        "type": "symlink",
+        "link_target": link_target,
+        "link_mode": stat.S_IMODE(link_after.st_mode),
+        "link_uid": link_after.st_uid,
+        "link_gid": link_after.st_gid,
+        "link_device": link_after.st_dev,
+        "link_inode": link_after.st_ino,
+        "resolved_path": str(target),
+        "sha256": digest,
+        "size": target_after.st_size,
+        "mode": stat.S_IMODE(target_after.st_mode),
+        "uid": target_after.st_uid,
+        "gid": target_after.st_gid,
+        "device": target_after.st_dev,
+        "inode": target_after.st_ino,
+    }
+
+
+def _artifact_record(
+    name: str,
+    path: Path,
+    *,
+    allow_symlink: bool = False,
+) -> dict[str, object]:
     if not _SAFE_NAME_RE.fullmatch(name):
         raise InventoryError("rollback artifact names must be simple and unique")
+    expanded = path.expanduser()
+    if (
+        not expanded.is_absolute()
+        or expanded == Path("/")
+        or {part.lower() for part in expanded.parts} & _FORBIDDEN_PATH_NAMES
+        or expanded.suffix.lower() in _FORBIDDEN_SUFFIXES
+    ):
+        raise InventoryError(f"rollback artifact path may contain secret material: {expanded}")
+    if expanded.is_symlink():
+        if not allow_symlink:
+            raise InventoryError("rollback artifacts must be regular non-symlink files")
+        return _symlink_artifact_record(name, expanded)
     source = _safe_artifact_path(path)
     before = source.stat()
     digest = _file_digest(source)
@@ -128,6 +195,7 @@ def _artifact_record(name: str, path: Path) -> dict[str, object]:
     return {
         "name": name,
         "path": str(source),
+        "type": "regular",
         "sha256": digest,
         "size": after.st_size,
         "mode": stat.S_IMODE(after.st_mode),
@@ -169,7 +237,7 @@ def build_rollback_manifest(
         raise InventoryError("at least one additional non-secret rollback artifact is required")
     if len(set(artifacts)) != len(artifacts):
         raise InventoryError("rollback artifact names must be unique")
-    records = [_artifact_record("legacy_codex_bin", codex_bin)]
+    records = [_artifact_record("legacy_codex_bin", codex_bin, allow_symlink=True)]
     records.extend(_artifact_record(name, path) for name, path in sorted(artifacts.items()))
     manifest: dict[str, object] = {
         "schema": ROLLBACK_MANIFEST_SCHEMA,
@@ -263,11 +331,15 @@ def verify_rollback_manifest(path: Path) -> dict[str, object]:
         if not isinstance(name, str):
             raise InventoryError("rollback manifest artifact name is invalid")
         try:
-            observed = _artifact_record(name, Path(str(raw.get("path", ""))))
+            observed = _artifact_record(
+                name,
+                Path(str(raw.get("path", ""))),
+                allow_symlink=name == "legacy_codex_bin" and raw.get("type") == "symlink",
+            )
         except InventoryError as exc:
             failures.append(str(exc))
             continue
-        for field in ("path", "sha256", "size", "mode", "uid", "gid", "device", "inode"):
+        for field in set(raw) - {"name"}:
             if observed.get(field) != raw.get(field):
                 failures.append(f"rollback artifact {name} {field} changed")
         checked_artifacts.append({"name": name, "sha256": observed["sha256"]})
