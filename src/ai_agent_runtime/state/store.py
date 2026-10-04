@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     binding_id TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
+    ordering_sequence INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
     next_retry_at REAL NOT NULL,
     ack_state TEXT NOT NULL DEFAULT 'PENDING'
@@ -239,13 +240,15 @@ class RuntimeStore:
             "INTEGER",
         )
         self._ensure_column("instances", "last_heartbeat_at", "REAL")
+        self._ensure_column("outbox", "ordering_sequence", "INTEGER")
+        self._backfill_outbox_ordering_sequences()
         self._ensure_column("codex_rollout_observers", "active_turn_id", "TEXT")
         self._ensure_column("codex_rollout_observers", "pending_model", "TEXT")
         self._ensure_column("codex_rollout_observers", "pending_reasoning_effort", "TEXT")
         self._ensure_column("codex_rollout_observers", "pending_evidence_digest", "TEXT")
         self._ensure_column("codex_rollout_observers", "pending_turn_id", "TEXT")
         self._connection.execute(
-            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '1')"
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '2')"
         )
         self._connection.commit()
         os.chmod(path, 0o600)
@@ -257,6 +260,30 @@ class RuntimeStore:
         }
         if column not in columns:
             self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _backfill_outbox_ordering_sequences(self) -> None:
+        """Upgrade valid pre-ordering observed events without trusting malformed rows."""
+
+        rows = self._connection.execute(
+            """
+            SELECT event_id, payload_json, payload_digest FROM outbox
+            WHERE kind='OBSERVED_SPEC_PROPOSAL' AND ordering_sequence IS NULL
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or sha256_digest(payload) != row["payload_digest"]:
+                continue
+            sequence = payload.get("observation_sequence")
+            if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+                continue
+            self._connection.execute(
+                "UPDATE outbox SET ordering_sequence=? WHERE event_id=?",
+                (sequence, row["event_id"]),
+            )
 
     def close(self) -> None:
         self._connection.close()
@@ -1495,6 +1522,7 @@ class RuntimeStore:
             kind="OBSERVED_SPEC_PROPOSAL",
             binding_id=proposal.binding_id,
             payload=proposal.payload(),
+            ordering_sequence=proposal.observation_sequence,
         )
         return proposal.event_id
 
@@ -1546,19 +1574,22 @@ class RuntimeStore:
         encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         payload_digest = sha256_digest(payload)
         existing = self._connection.execute(
-            "SELECT payload_digest FROM outbox WHERE event_id=?",
+            "SELECT payload_digest, ordering_sequence FROM outbox WHERE event_id=?",
             (proposal.event_id,),
         ).fetchone()
-        if existing is not None and existing["payload_digest"] != payload_digest:
-            raise ValueError("outbox event_id reused with different payload")
+        if existing is not None:
+            if existing["payload_digest"] != payload_digest:
+                raise ValueError("outbox event_id reused with different payload")
+            if existing["ordering_sequence"] != proposal.observation_sequence:
+                raise ValueError("outbox event_id reused with different ordering sequence")
         now = time.time()
         with self._connection:
             self._connection.execute(
                 """
                 INSERT INTO outbox(
                     event_id, kind, binding_id, payload_json, payload_digest,
-                    attempts, next_retry_at, ack_state
-                ) VALUES(?, 'OBSERVED_SPEC_PROPOSAL', ?, ?, ?, 0, 0, 'PENDING')
+                    ordering_sequence, attempts, next_retry_at, ack_state
+                ) VALUES(?, 'OBSERVED_SPEC_PROPOSAL', ?, ?, ?, ?, 0, 0, 'PENDING')
                 ON CONFLICT(event_id) DO NOTHING
                 """,
                 (
@@ -1566,6 +1597,7 @@ class RuntimeStore:
                     proposal.binding_id,
                     encoded_payload,
                     payload_digest,
+                    proposal.observation_sequence,
                 ),
             )
             applied = self._connection.execute(
@@ -1688,25 +1720,38 @@ class RuntimeStore:
         kind: str,
         binding_id: str,
         payload: dict[str, object],
+        ordering_sequence: int | None = None,
     ) -> None:
+        if ordering_sequence is not None and ordering_sequence < 0:
+            raise ValueError("outbox ordering sequence must be non-negative")
         payload_digest = sha256_digest(payload)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         existing = self._connection.execute(
-            "SELECT payload_digest FROM outbox WHERE event_id=?",
+            "SELECT payload_digest, ordering_sequence FROM outbox WHERE event_id=?",
             (event_id,),
         ).fetchone()
-        if existing is not None and existing["payload_digest"] != payload_digest:
-            raise ValueError("outbox event_id reused with different payload")
+        if existing is not None:
+            if existing["payload_digest"] != payload_digest:
+                raise ValueError("outbox event_id reused with different payload")
+            if existing["ordering_sequence"] != ordering_sequence:
+                raise ValueError("outbox event_id reused with different ordering sequence")
         with self._connection:
             self._connection.execute(
                 """
                 INSERT INTO outbox(
                     event_id, kind, binding_id, payload_json, payload_digest,
-                    attempts, next_retry_at, ack_state
-                ) VALUES(?, ?, ?, ?, ?, 0, 0, 'PENDING')
+                    ordering_sequence, attempts, next_retry_at, ack_state
+                ) VALUES(?, ?, ?, ?, ?, ?, 0, 0, 'PENDING')
                 ON CONFLICT(event_id) DO NOTHING
                 """,
-                (event_id, kind, binding_id, encoded, payload_digest),
+                (
+                    event_id,
+                    kind,
+                    binding_id,
+                    encoded,
+                    payload_digest,
+                    ordering_sequence,
+                ),
             )
 
     def claim_outbox(
@@ -1721,9 +1766,22 @@ class RuntimeStore:
         with self._connection:
             rows = self._connection.execute(
                 """
-                SELECT * FROM outbox
-                WHERE ack_state='PENDING' AND next_retry_at <= ?
-                ORDER BY next_retry_at, event_id
+                SELECT pending.* FROM outbox AS pending
+                WHERE pending.ack_state='PENDING' AND pending.next_retry_at <= ?
+                  AND (
+                    pending.kind != 'OBSERVED_SPEC_PROPOSAL'
+                    OR NOT EXISTS (
+                      SELECT 1 FROM outbox AS newer
+                      WHERE newer.binding_id=pending.binding_id
+                        AND newer.kind='OBSERVED_SPEC_PROPOSAL'
+                        AND newer.ack_state='PENDING'
+                        AND COALESCE(newer.ordering_sequence, -1)
+                            > COALESCE(pending.ordering_sequence, -1)
+                    )
+                  )
+                ORDER BY pending.next_retry_at,
+                         COALESCE(pending.ordering_sequence, -1) DESC,
+                         pending.event_id
                 LIMIT ?
                 """,
                 (current, limit),

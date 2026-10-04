@@ -104,6 +104,12 @@ lease. `outbox_ack` finalizes an event as `ACKED`, `STALE_OBSERVED`, or
 `POLICY_REJECTED`; replaying the same ACK is idempotent, while changing a final ACK
 is rejected. Observed proposals carry their base generation/revision/digest so CUS
 can reject delayed state rather than overwrite a newer user choice.
+For multiple offline observations of one binding, Runtime releases the highest
+`observation_sequence` first and keeps older proposals behind its retry lease. This
+prevents an older queued observation from overtaking the locally latest proven state;
+after the latest event is finalized, older proposals may be delivered only to receive
+the normal stale-base acknowledgement. Existing V1 databases backfill this ordering
+field only from digest-valid proposal payloads.
 
 Pending proposals also back the Runtime's local launch overlay and are visible as
 `OBSERVED_PENDING_SYNC`. `POLICY_REJECTED` remains visible as

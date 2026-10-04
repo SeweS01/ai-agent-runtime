@@ -234,6 +234,62 @@ def test_accepted_observed_revision_becomes_applied_without_retirement(tmp_path:
     assert effective[0].source_ref == event["event_id"]
 
 
+def test_stale_observed_ack_restores_newer_cus_desired_and_safe_retirement(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.touch(mode=0o600)
+    daemon = _daemon_with_applied_rollout(tmp_path, rollout=rollout)
+    for record in (
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "t1", "model": "gpt-observed", "effort": "high"},
+        },
+        {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1"}},
+    ):
+        _append(rollout, record)
+    daemon._observe_codex_rollout(daemon.store.rollout_observation_targets()[0])
+    event = daemon.store.claim_outbox(now=1.0)[0]
+
+    effective = daemon.store.get_effective_spec("binding-1")
+    assert effective is not None
+    base, codex_home, profile_fingerprint = effective
+    newer_cus = DesiredSpec.build(
+        binding_id=base.binding_id,
+        agent_instance_id=base.agent_instance_id,
+        project_id=base.project_id,
+        canonical_cwd=base.canonical_cwd,
+        provider=base.provider,
+        account_profile=base.account_profile,
+        model="gpt-cus-newer",
+        reasoning_effort="medium",
+        generation_id=base.generation_id,
+        revision=base.revision + 1,
+        source_kind="cus_ui",
+        source_ref="change-2",
+    )
+    daemon.store.put_effective_spec(
+        newer_cus,
+        codex_home=codex_home,
+        profile_fingerprint=profile_fingerprint,
+    )
+
+    launch = daemon.store.get_launch_spec("binding-1")
+    assert launch is not None
+    assert launch[0].spec_digest == newer_cus.spec_digest
+    assert daemon.store.retirement_candidates() == ()
+
+    daemon.store.acknowledge_outbox(str(event["event_id"]), "STALE_OBSERVED")
+
+    report = daemon.store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert report["health"] == "PENDING_CHANGE"  # type: ignore[index]
+    candidates = daemon.store.retirement_candidates()
+    assert len(candidates) == 1
+    assert candidates[0].desired_spec_digest == newer_cus.spec_digest
+    assert candidates[0].applied_spec_digest != newer_cus.spec_digest
+
+
 def test_historical_change_reverted_before_catchup_does_not_emit(tmp_path: Path) -> None:
     rollout = tmp_path / "rollout.jsonl"
     rollout.touch(mode=0o600)
