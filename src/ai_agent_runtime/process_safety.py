@@ -184,6 +184,57 @@ def file_sha256(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def process_executable_evidence(pid: int) -> dict[str, object]:
+    """Capture immutable executable identity for one live Linux process."""
+
+    executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+    validated = validate_owned_executable(executable, uid=proc_uid(pid))
+    metadata = validated.stat()
+    return {
+        "path": str(validated),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "sha256": file_sha256(validated),
+    }
+
+
+def verify_process_executable_evidence(
+    pid: int,
+    expected: object,
+    *,
+    verify_digest: bool,
+) -> None:
+    """Fail closed if a live process no longer matches captured executable evidence."""
+
+    if not isinstance(expected, dict):
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH,
+            "wrapper executable evidence is absent",
+        )
+    executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+    validated = validate_owned_executable(executable, uid=proc_uid(pid))
+    metadata = validated.stat()
+    observed = {
+        "path": str(validated),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+    }
+    if any(expected.get(key) != value for key, value in observed.items()):
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH,
+            "wrapper executable identity changed",
+        )
+    if verify_digest and expected.get("sha256") != file_sha256(validated):
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH,
+            "wrapper executable digest changed",
+        )
+
+
 def validate_owned_executable(path: Path, *, uid: int | None = None) -> Path:
     expected_uid = os.getuid() if uid is None else uid
     if not path.is_absolute():

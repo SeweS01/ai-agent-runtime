@@ -33,12 +33,14 @@ from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 from ai_agent_runtime.ipc.protocol import read_frame, validate_version, versioned, write_frame
 from ai_agent_runtime.process_safety import (
     file_sha256,
+    process_executable_evidence,
     profile_fingerprint,
     retire_tmux_session,
     validate_owned_executable,
     validate_profile_path,
     validate_project_path,
     verify_codex_child,
+    verify_process_executable_evidence,
     verify_wrapper_identity,
 )
 from ai_agent_runtime.providers.codex.rollout import (
@@ -269,6 +271,7 @@ class RuntimeServer:
         identity = _identity(payload)
         _verify_claimed_peer(identity, peer_pid=peer_pid, peer_uid=peer_uid)
         self.identity_verifier(identity)
+        wrapper_executable = process_executable_evidence(identity.pid)
         config_snapshot = read_topic_config(self.config.topic_config_path)
         bindings = self.store.list_bindings(self.config.agent_instance_id)
         try:
@@ -328,6 +331,12 @@ class RuntimeServer:
         safe_home = validate_profile_path(codex_home, root=self.config.profiles_root)
         instance_id = str(uuid.uuid4())
         launch_context: dict[str, object] = {
+            "wrapper_identity": {
+                "pid": identity.pid,
+                "starttime": identity.starttime,
+                "uid": identity.uid,
+                "executable": wrapper_executable,
+            },
             "desired": {
                 "binding_id": spec.binding_id,
                 "agent_instance_id": spec.agent_instance_id,
@@ -359,6 +368,8 @@ class RuntimeServer:
             lifecycle=LifecycleState.PROVISIONAL_STARTING,
             applied_digest=None,
             launch_spec=launch_context,
+            daemon_boot_id=self.boot_id,
+            connection_generation=0,
         )
         return self._ok(
             request_id,
@@ -1083,6 +1094,11 @@ class RuntimeServer:
                 "started child does not match registered provisional instance",
             )
         launch = registered.launch_spec
+        verify_process_executable_evidence(
+            identity.pid,
+            _wrapper_executable_from_launch(launch),
+            verify_digest=True,
+        )
         raw_desired = launch.get("desired")
         if not isinstance(raw_desired, dict):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "instance desired spec is invalid")
@@ -1129,6 +1145,8 @@ class RuntimeServer:
             # session's rollout identity is not necessarily durable yet.
             # AppliedSpec remains unset until rollout evidence is collected.
             applied_digest=None,
+            daemon_boot_id=self.boot_id,
+            connection_generation=registered.connection_generation,
             heartbeat_at=time.time(),
         )
         return self._ok(
@@ -1165,9 +1183,20 @@ class RuntimeServer:
         identity = _identity(payload)
         _verify_claimed_peer(identity, peer_pid=peer_pid, peer_uid=peer_uid)
         self.identity_verifier(identity)
+        registered = self.store.get_registered_instance(_required_str(payload, "instance_id"))
+        if registered is None:
+            raise RuntimeFailureError(
+                ErrorCode.CORRELATION_MISMATCH,
+                "heartbeat instance is not registered",
+            )
+        verify_process_executable_evidence(
+            identity.pid,
+            _wrapper_executable_from_launch(registered.launch_spec),
+            verify_digest=registered.daemon_boot_id != self.boot_id,
+        )
         try:
-            lifecycle, heartbeat_at = self.store.heartbeat_instance(
-                instance_id=_required_str(payload, "instance_id"),
+            lifecycle, heartbeat_at, resynchronized = self.store.heartbeat_instance(
+                instance_id=registered.instance_id,
                 binding_id=_required_str(payload, "binding_id"),
                 wrapper_pid=identity.pid,
                 wrapper_starttime=identity.starttime,
@@ -1175,6 +1204,9 @@ class RuntimeServer:
                 child_starttime=_required_int(payload, "child_starttime"),
                 tmux_session=identity.tmux_session,
                 tmux_pane=identity.tmux_pane,
+                daemon_boot_id=self.boot_id,
+                previous_daemon_boot_id=previous_boot_id,
+                connection_generation=connection_generation,
             )
         except KeyError as exc:
             raise RuntimeFailureError(
@@ -1186,7 +1218,7 @@ class RuntimeServer:
             heartbeat_at=heartbeat_at,
             lifecycle=lifecycle,
             connection_generation=connection_generation,
-            resynchronized=(previous_boot_id is not None and previous_boot_id != self.boot_id),
+            resynchronized=resynchronized,
         )
 
     def _control_plane_heartbeat(
@@ -1253,6 +1285,11 @@ class RuntimeServer:
                 ErrorCode.CORRELATION_MISMATCH,
                 "exited child does not match registered wrapper instance",
             )
+        verify_process_executable_evidence(
+            identity.pid,
+            _wrapper_executable_from_launch(registered.launch_spec),
+            verify_digest=False,
+        )
         self.store.mark_instance_exited(
             instance_id=instance_id,
             binding_id=binding_id,
@@ -1360,6 +1397,9 @@ class RuntimeServer:
                         "rollout_inode": rollout_stat.st_ino,
                         "wrapper_pid": instance.wrapper_pid,
                         "wrapper_starttime": instance.wrapper_starttime,
+                        "wrapper_identity": instance.launch_spec.get("wrapper_identity"),
+                        "daemon_boot_id": instance.daemon_boot_id,
+                        "connection_generation": instance.connection_generation,
                         "tmux_session": instance.tmux_session,
                         "tmux_pane": instance.tmux_pane,
                     }
@@ -1561,6 +1601,16 @@ class RuntimeServer:
             daemon_boot_id=self.boot_id,
             error={"code": code, "detail": detail},
         )
+
+
+def _wrapper_executable_from_launch(launch: dict[str, Any]) -> object:
+    wrapper_identity = launch.get("wrapper_identity")
+    if not isinstance(wrapper_identity, dict):
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH,
+            "registered wrapper process identity is absent",
+        )
+    return wrapper_identity.get("executable")
 
 
 def _identity(payload: dict[str, Any]) -> WrapperIdentity:

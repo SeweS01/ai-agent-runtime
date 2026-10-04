@@ -200,6 +200,8 @@ class PendingEvidenceInstance:
     child_starttime: int
     tmux_session: str
     tmux_pane: str
+    daemon_boot_id: str
+    connection_generation: int
     launch_spec: dict[str, Any]
 
 
@@ -249,6 +251,8 @@ class RegisteredInstance:
     wrapper_starttime: int
     tmux_session: str
     tmux_pane: str
+    daemon_boot_id: str
+    connection_generation: int
     launch_spec: dict[str, Any]
 
 

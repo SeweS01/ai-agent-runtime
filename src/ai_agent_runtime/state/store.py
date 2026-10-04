@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS instances (
     lifecycle TEXT NOT NULL,
     applied_digest TEXT,
     launch_spec_json TEXT,
+    daemon_boot_id TEXT,
+    connection_generation INTEGER,
     last_heartbeat_at REAL,
     updated_at REAL NOT NULL
 );
@@ -175,6 +177,12 @@ class RuntimeStore:
             "TEXT NOT NULL DEFAULT 'MANAGED'",
         )
         self._ensure_column("instances", "launch_spec_json", "TEXT")
+        self._ensure_column("instances", "daemon_boot_id", "TEXT")
+        self._ensure_column(
+            "instances",
+            "connection_generation",
+            "INTEGER",
+        )
         self._ensure_column("instances", "last_heartbeat_at", "REAL")
         self._ensure_column("codex_rollout_observers", "active_turn_id", "TEXT")
         self._ensure_column("codex_rollout_observers", "pending_model", "TEXT")
@@ -649,6 +657,8 @@ class RuntimeStore:
         lifecycle: str,
         applied_digest: str | None,
         launch_spec: dict[str, object] | None = None,
+        daemon_boot_id: str | None = None,
+        connection_generation: int | None = None,
         heartbeat_at: float | None = None,
     ) -> None:
         encoded_launch = (
@@ -662,8 +672,9 @@ class RuntimeStore:
                 INSERT INTO instances(
                     instance_id, binding_id, wrapper_pid, wrapper_starttime, child_pid,
                     child_starttime, tmux_session, tmux_pane, lifecycle, applied_digest,
-                    launch_spec_json, last_heartbeat_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    launch_spec_json, daemon_boot_id, connection_generation,
+                    last_heartbeat_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(instance_id) DO UPDATE SET
                     child_pid=excluded.child_pid,
                     child_starttime=excluded.child_starttime,
@@ -672,6 +683,14 @@ class RuntimeStore:
                     launch_spec_json=COALESCE(
                         excluded.launch_spec_json,
                         instances.launch_spec_json
+                    ),
+                    daemon_boot_id=COALESCE(
+                        excluded.daemon_boot_id,
+                        instances.daemon_boot_id
+                    ),
+                    connection_generation=COALESCE(
+                        excluded.connection_generation,
+                        instances.connection_generation
                     ),
                     last_heartbeat_at=COALESCE(
                         excluded.last_heartbeat_at,
@@ -691,6 +710,8 @@ class RuntimeStore:
                     lifecycle,
                     applied_digest,
                     encoded_launch,
+                    daemon_boot_id,
+                    connection_generation,
                     heartbeat_at,
                     time.time(),
                 ),
@@ -707,12 +728,15 @@ class RuntimeStore:
         child_starttime: int,
         tmux_session: str,
         tmux_pane: str,
-    ) -> tuple[str, float]:
+        daemon_boot_id: str,
+        previous_daemon_boot_id: str | None,
+        connection_generation: int,
+    ) -> tuple[str, float, bool]:
         heartbeat_at = time.time()
         with self._connection:
             row = self._connection.execute(
                 """
-                SELECT lifecycle FROM instances
+                SELECT lifecycle, daemon_boot_id, connection_generation FROM instances
                 WHERE instance_id=? AND binding_id=?
                   AND wrapper_pid=? AND wrapper_starttime=?
                   AND child_pid=? AND child_starttime=?
@@ -732,20 +756,47 @@ class RuntimeStore:
             ).fetchone()
             if row is None:
                 raise KeyError("heartbeat identity does not match a live instance")
+            stored_boot_id = row["daemon_boot_id"]
+            raw_stored_generation = row["connection_generation"]
+            if not isinstance(stored_boot_id, str) or not stored_boot_id:
+                raise KeyError("heartbeat instance has no daemon boot identity")
+            if not isinstance(raw_stored_generation, int):
+                raise KeyError("heartbeat instance has no connection generation")
+            stored_generation = raw_stored_generation
+            resynchronized = stored_boot_id != daemon_boot_id
+            if resynchronized:
+                if previous_daemon_boot_id != stored_boot_id:
+                    raise KeyError("heartbeat previous daemon boot identity mismatch")
+                if connection_generation != stored_generation:
+                    raise KeyError("heartbeat generation changed before daemon resync ACK")
+            else:
+                if previous_daemon_boot_id != daemon_boot_id:
+                    raise KeyError("heartbeat daemon boot identity mismatch")
+                if connection_generation < stored_generation:
+                    raise KeyError("heartbeat connection generation regressed")
             self._connection.execute(
                 """
-                UPDATE instances SET last_heartbeat_at=?, updated_at=?
+                UPDATE instances
+                SET daemon_boot_id=?, connection_generation=?,
+                    last_heartbeat_at=?, updated_at=?
                 WHERE instance_id=?
                 """,
-                (heartbeat_at, heartbeat_at, instance_id),
+                (
+                    daemon_boot_id,
+                    connection_generation,
+                    heartbeat_at,
+                    heartbeat_at,
+                    instance_id,
+                ),
             )
-        return str(row["lifecycle"]), heartbeat_at
+        return str(row["lifecycle"]), heartbeat_at, resynchronized
 
     def get_registered_instance(self, instance_id: str) -> RegisteredInstance | None:
         row = self._connection.execute(
             """
             SELECT instance_id, binding_id, wrapper_pid, wrapper_starttime,
-                   tmux_session, tmux_pane, launch_spec_json
+                   tmux_session, tmux_pane, daemon_boot_id,
+                   connection_generation, launch_spec_json
             FROM instances WHERE instance_id=?
             """,
             (instance_id,),
@@ -762,6 +813,8 @@ class RuntimeStore:
             wrapper_starttime=row["wrapper_starttime"],
             tmux_session=row["tmux_session"],
             tmux_pane=row["tmux_pane"],
+            daemon_boot_id=str(row["daemon_boot_id"] or ""),
+            connection_generation=int(row["connection_generation"] or 0),
             launch_spec=launch_spec,
         )
 
@@ -881,7 +934,7 @@ class RuntimeStore:
             """
             SELECT instance_id, binding_id, wrapper_pid, wrapper_starttime,
                    child_pid, child_starttime, tmux_session, tmux_pane,
-                   launch_spec_json
+                   daemon_boot_id, connection_generation, launch_spec_json
             FROM instances
             WHERE child_pid IS NOT NULL
               AND child_starttime IS NOT NULL
@@ -901,6 +954,8 @@ class RuntimeStore:
                 child_starttime=row["child_starttime"],
                 tmux_session=row["tmux_session"],
                 tmux_pane=row["tmux_pane"],
+                daemon_boot_id=str(row["daemon_boot_id"] or ""),
+                connection_generation=int(row["connection_generation"] or 0),
                 launch_spec=json.loads(row["launch_spec_json"]),
             )
             for row in rows
@@ -1227,6 +1282,8 @@ class RuntimeStore:
                     "wrapper_starttime": row["wrapper_starttime"],
                     "child_pid": row["child_pid"],
                     "child_starttime": row["child_starttime"],
+                    "daemon_boot_id": row["daemon_boot_id"],
+                    "connection_generation": row["connection_generation"],
                     "last_heartbeat_at": row["last_heartbeat_at"],
                     "applied": (
                         {

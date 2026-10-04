@@ -19,6 +19,9 @@ daemon restart. Reusing an ID with a different payload is rejected.
 
 - `register`: Phase A launch authorization. Inputs include AgentInstance, wrapper
   PID/starttime/UID, cwd, tmux session/pane, and optional resume session ID.
+  Runtime independently captures the live `/proc/<pid>/exe` path, device, inode,
+  size, mtime and SHA-256; wrapper-supplied data is not trusted for executable
+  identity.
 - `verify_started`: Phase B verification after the real child starts. Inputs add
   instance/binding IDs and child PID/starttime.
 - `child_exited`: terminal wrapper notification with the same composite process and
@@ -105,7 +108,10 @@ message text and Telegram delivery.
 After Phase B succeeds, wrapper sends a bounded best-effort heartbeat while the
 Codex child is alive. Every heartbeat repeats the exact wrapper/child/tmux identity,
 `connection_generation`, and the last observed `daemon_boot_id`. Runtime accepts it
-only for the matching non-exited instance and persists `last_heartbeat_at`. A changed
-daemon boot ID causes wrapper to advance its connection generation on the next
-heartbeat. Socket outages never terminate an already-running child; startup and
-Phase B remain fail closed.
+only for the matching non-exited instance, matching captured wrapper executable,
+non-regressing connection generation, and exact previously acknowledged daemon boot
+ID. On a real daemon restart Runtime re-hashes the wrapper executable before ACK,
+persists the new boot epoch, and causes wrapper to advance its connection generation
+on the next heartbeat. A stale or fabricated boot handshake fails closed. Socket
+outages never terminate an already-running child; startup and Phase B remain fail
+closed.

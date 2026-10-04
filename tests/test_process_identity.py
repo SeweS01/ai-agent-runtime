@@ -8,8 +8,10 @@ from ai_agent_runtime.domain import WrapperIdentity
 from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 from ai_agent_runtime.process_safety import (
     TmuxPaneProcess,
+    process_executable_evidence,
     retire_tmux_session,
     verify_codex_child,
+    verify_process_executable_evidence,
     verify_wrapper_identity,
 )
 
@@ -71,6 +73,19 @@ def test_wrapper_identity_rejects_tmux_process_mismatch(
     with pytest.raises(RuntimeFailureError) as failure:
         verify_wrapper_identity(_identity())
     assert failure.value.code is ErrorCode.AMBIGUOUS
+
+
+def test_process_executable_evidence_is_digest_bound() -> None:
+    evidence = process_executable_evidence(os.getpid())
+    assert evidence["inode"] > 0
+    assert str(evidence["sha256"]).startswith("sha256:")
+    verify_process_executable_evidence(os.getpid(), evidence, verify_digest=True)
+
+    tampered = dict(evidence)
+    tampered["inode"] = int(evidence["inode"]) + 1
+    with pytest.raises(RuntimeFailureError) as mismatch:
+        verify_process_executable_evidence(os.getpid(), tampered, verify_digest=False)
+    assert mismatch.value.code is ErrorCode.CORRELATION_MISMATCH
 
 
 def test_retirement_kills_exact_verified_tmux_session_id(
