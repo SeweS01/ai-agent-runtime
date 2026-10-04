@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import ctypes
+import functools
 import os
 import re
 import signal
@@ -72,7 +73,7 @@ def _tmux_identity(pane: str) -> str:
     return session
 
 
-def _child_setup() -> None:
+def _child_setup(expected_parent_pid: int) -> None:
     # A new process group permits bounded group termination while retaining the
     # pane's controlling terminal, which Codex TUI requires.
     os.setpgid(0, 0)
@@ -80,6 +81,12 @@ def _child_setup() -> None:
     if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
+    # PR_SET_PDEATHSIG is not retroactive. If the wrapper died after fork but
+    # before prctl, the kernel would otherwise leave the child alive. Compare
+    # against the PID captured by the parent before Popen and fail immediately
+    # when reparenting already happened.
+    if os.getppid() != expected_parent_pid:
+        os.kill(os.getpid(), signal.SIGKILL)
 
 
 def _call_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> dict[str, Any]:
@@ -213,13 +220,14 @@ def _run_supervised(
     registration: dict[str, Any],
     config: RuntimeConfig,
 ) -> int:
+    wrapper_pid = os.getpid()
     child = subprocess.Popen(
         [binary, *argv],
         env=environment,
         stdin=None,
         stdout=None,
         stderr=None,
-        preexec_fn=_child_setup,
+        preexec_fn=functools.partial(_child_setup, wrapper_pid),
     )
     child_starttime = proc_starttime(child.pid)
     terminate_requested = False
