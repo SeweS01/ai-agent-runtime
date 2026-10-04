@@ -44,6 +44,20 @@ HEAD, verifies the complete qualification manifest, checks namespace/path/forum/
 uniqueness, and performs no mutations. `READY_FOR_STAGING` explicitly does not
 authorize production cutover.
 
+After starting a staging instance, run the read-only live diagnostic before any
+Telegram prompt test:
+
+```bash
+ai-agent-runtime --config ~/.config/ai-agent-runtime/instances/ta_staging_01.toml doctor
+```
+
+`doctor` fails unless it can verify the mode/owner of the local socket, obtain a
+versioned daemon status response, open the SQLite store read-only and pass
+`quick_check`, match the real Codex digest and version, revalidate every effective
+profile fingerprint, parse both upstream config/state files, and prove exact
+binding/topic/active-tmux correlation. Its report includes
+`mutations_performed=false`; it neither repairs drift nor creates missing state.
+
 # Migration M0 inventory
 
 Before switching `TELEGRAM_CODEX_BIN`, create a read-only baseline artifact for

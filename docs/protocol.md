@@ -5,6 +5,12 @@ request carries `protocol_major`, `protocol_minor`, `action`, and a globally uni
 `request_id`. Runtime verifies `SO_PEERCRED`; wrapper registration additionally
 requires its claimed PID and UID to match the socket peer.
 
+Every frame read/write has a deadline. Ordinary wrapper commands use a 10-second
+response deadline. `verify_started` uses 60 seconds because the qualified Phase B
+state correlation may wait up to 45 seconds; the client deadline must always exceed
+the daemon's bounded verification window. Heartbeats are best effort and have their
+own 2-second outer deadline.
+
 Successful mutating responses are stored durably with a digest of the request. A
 retry using the same ID and payload returns the original outcome, including after a
 daemon restart. Reusing an ID with a different payload is rejected.

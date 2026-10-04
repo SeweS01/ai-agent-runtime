@@ -13,6 +13,7 @@ from pathlib import Path
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
 from ai_agent_runtime.deployment.audit import audit_deployment_manifest
+from ai_agent_runtime.health.doctor import collect_doctor_report
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
@@ -25,13 +26,11 @@ from ai_agent_runtime.migration.inventory import (
     write_json_artifact,
 )
 from ai_agent_runtime.migration.session_storage import build_session_storage_manifest
-from ai_agent_runtime.process_safety import validate_owned_executable
 from ai_agent_runtime.qualification.release_gate import (
     build_qualification_manifest,
     verify_qualification_manifest,
 )
 from ai_agent_runtime.state.store import RuntimeStore
-from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
 
 def _load_config(path: str) -> RuntimeConfig:
@@ -49,24 +48,10 @@ async def _status(config: RuntimeConfig) -> int:
     return 0 if response.get("ok") else 1
 
 
-def _doctor(config: RuntimeConfig) -> int:
-    checks: dict[str, dict[str, str | bool]] = {}
-
-    def run_check(name: str, callback: object) -> None:
-        try:
-            assert callable(callback)
-            detail = callback()
-            checks[name] = {"ok": True, "detail": str(detail)}
-        except Exception as exc:
-            checks[name] = {"ok": False, "detail": str(exc)}
-
-    run_check("real_codex", lambda: validate_owned_executable(config.real_codex))
-    run_check("profiles_root", lambda: config.profiles_root.resolve(strict=True))
-    run_check("topic_config", lambda: read_topic_config(config.topic_config_path).digest)
-    run_check("tmux_state_parent", lambda: config.tmux_state_path.parent.resolve(strict=True))
-    run_check("state_dir", lambda: config.state_dir.resolve(strict=True))
-    print(json.dumps(checks, indent=2, sort_keys=True))
-    return 0 if all(bool(item["ok"]) for item in checks.values()) else 1
+async def _doctor(config: RuntimeConfig) -> int:
+    report = await collect_doctor_report(config)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["healthy"] is True else 1
 
 
 def _local_summary(config: RuntimeConfig) -> int:
@@ -332,7 +317,7 @@ def main() -> None:
         if namespace.command == "local-summary":
             raise SystemExit(_local_summary(config))
         if namespace.command == "doctor":
-            raise SystemExit(_doctor(config))
+            raise SystemExit(asyncio.run(_doctor(config)))
         if namespace.command == "inventory" and namespace.inventory_command == "export":
             raise SystemExit(
                 _inventory_export(

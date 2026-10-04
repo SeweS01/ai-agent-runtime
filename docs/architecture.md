@@ -58,10 +58,11 @@ sends that message itself; the CUS connector and CUS Bot remain the delivery ada
 
 The executable launch skeleton, durable/idempotent local protocol, incremental and
 authoritative snapshot apply, durable retrying outbox, SQLite state, fresh-read
-adapters, two-phase correlation, process-group supervision, qualified Codex rollout
-observation, and fail-closed policies are implemented and tested. The Runtime also
-contains exact-target retirement orchestration, but its configuration defaults to
-disabled and enabling it requires a qualification report identifier. Deterministic
-upstream retirement-race qualification, full CUS product/UI wiring, and real
-Telegram/Codex E2E qualification remain release blockers. This milestone is not a
-production release.
+adapters, two-phase correlation, process-group supervision, live-wrapper
+resynchronization, qualified Codex rollout observation, exact-target retirement,
+read-only operator diagnostics, and fail-closed policies are implemented and tested.
+Retirement remains disabled by default and requires a qualification report
+identifier. A deterministic pinned-upstream retirement harness exists, but only a
+staging artifact can satisfy the release gate. Real Telegram/Codex E2E, session
+storage lifecycle, and rollback-drill evidence remain production release blockers.
+This milestone is not a production release.

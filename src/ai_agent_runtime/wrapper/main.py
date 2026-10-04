@@ -32,6 +32,7 @@ from ai_agent_runtime.providers.codex.argv import (
 _PR_SET_PDEATHSIG = 1
 _HEARTBEAT_INTERVAL_SECONDS = 2.0
 _HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 2.0
+_PHASE_B_RESPONSE_TIMEOUT_SECONDS = 60.0
 _INSTANCE_EXECUTABLE = re.compile(r"^codex-wrapper@([A-Za-z0-9][A-Za-z0-9_.-]{0,63})$")
 _EXIT_BY_CODE = {
     ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS.value: 70,
@@ -82,8 +83,17 @@ def _child_setup() -> None:
 
 
 def _call_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    response_timeout = (
+        _PHASE_B_RESPONSE_TIMEOUT_SECONDS if payload.get("action") == "verify_started" else 10.0
+    )
     try:
-        response = asyncio.run(request(config.socket_path, payload))
+        response = asyncio.run(
+            request(
+                config.socket_path,
+                payload,
+                response_timeout=response_timeout,
+            )
+        )
     except (TimeoutError, OSError, EOFError, ValueError) as exc:
         _fail(ErrorCode.RUNTIME_UNAVAILABLE.value, str(exc))
     if not response.get("ok"):

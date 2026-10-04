@@ -18,6 +18,26 @@ def test_instance_specific_executable_selects_namespaced_config(
     )
 
 
+def test_phase_b_response_deadline_exceeds_daemon_verification_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, float]] = []
+
+    async def fake_request(
+        _path: Path,
+        payload: dict[str, object],
+        *,
+        response_timeout: float,
+    ) -> dict[str, object]:
+        observed.append((str(payload["action"]), response_timeout))
+        return {"ok": True}
+
+    monkeypatch.setattr(wrapper_main, "request", fake_request)
+    wrapper_main._call_runtime(RuntimeConfig.defaults(), {"action": "register"})
+    wrapper_main._call_runtime(RuntimeConfig.defaults(), {"action": "verify_started"})
+    assert observed == [("register", 10.0), ("verify_started", 60.0)]
+
+
 def test_agent_invocation_without_tmux_never_runs_real_codex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
