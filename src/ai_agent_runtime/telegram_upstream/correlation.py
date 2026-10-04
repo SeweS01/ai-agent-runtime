@@ -40,6 +40,8 @@ def phase_a_correlate(
             ErrorCode.AMBIGUOUS, "multiple bindings match tmux identity and cwd"
         )
     binding = candidates[0]
+    if binding.management_mode.value == "CONFIG_DRIFT":
+        raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, "binding config drift is unresolved")
     if binding.management_mode.value != "MANAGED":
         raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "binding is currently unmanaged")
     if binding.config_digest != topic_config.digest:

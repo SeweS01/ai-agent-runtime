@@ -1311,18 +1311,20 @@ class RuntimeServer:
         for binding in self.store.list_bindings(self.config.agent_instance_id):
             entry = snapshot.topic(binding.thread_id)
             if entry is None:
-                continue
-            if entry.engine != "codex":
+                mode = ManagementMode.CONFIG_DRIFT
+            elif entry.engine != "codex":
                 mode = ManagementMode.UNMANAGED
-            elif entry.exec_mode != "tmux":
-                mode = ManagementMode.UNSUPPORTED_CODEX_SUBPROCESS
             elif (
                 entry.cwd is not None
                 and Path(entry.cwd).resolve() == Path(binding.canonical_cwd).resolve()
             ):
-                mode = ManagementMode.MANAGED
+                mode = (
+                    ManagementMode.MANAGED
+                    if entry.exec_mode == "tmux"
+                    else ManagementMode.UNSUPPORTED_CODEX_SUBPROCESS
+                )
             else:
-                continue
+                mode = ManagementMode.CONFIG_DRIFT
             self.store.update_binding_observation(
                 binding.binding_id,
                 config_digest=snapshot.digest,

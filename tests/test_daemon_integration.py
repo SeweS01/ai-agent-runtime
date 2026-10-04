@@ -326,6 +326,28 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert len(unsupported) == 1
     assert unsupported[0]["payload"]["notification_code"] == ("UNSUPPORTED_CODEX_SUBPROCESS")
 
+    topic_config.write_text(
+        json.dumps(
+            {
+                "topics": {
+                    "42": {
+                        "cwd": str(tmp_path / "unexpected-project"),
+                        "engine": "codex",
+                        "exec_mode": "tmux",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    daemon._reconcile_topic_config_once()
+    drifted = daemon.store.get_binding("binding-1")
+    assert drifted is not None
+    assert drifted.management_mode == ManagementMode.CONFIG_DRIFT
+    assert daemon.store.status_report("agent-1")["bindings"][0]["health"] == (  # type: ignore[index]
+        "CONFIG_DRIFT"
+    )
+
     server_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await server_task

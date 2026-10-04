@@ -48,6 +48,12 @@ allowlisted patch, atomic replace, backup, and post-write verification before st
 the local effective spec. A different generation is rejected from this incremental
 action and requires `apply_snapshot`.
 
+The continuous fresh-read watcher records a missing topic key or a changed managed
+cwd as `CONFIG_DRIFT`; it never silently recreates the key and managed launch remains
+blocked until a successful reconciliation. A non-Codex engine is instead
+`UNMANAGED`, while `codex+subprocess` with the correct managed cwd is the distinct
+fail-closed `UNSUPPORTED_CODEX_SUBPROCESS` state.
+
 `apply_snapshot` is the only action allowed to introduce a new generation. It
 contains the complete AgentInstance desired inventory, one common generation, a
 canonical snapshot digest, explicit `unmanaged_bindings`, and explicit
