@@ -75,12 +75,17 @@ The source-level baseline checks can be run against a clean checkout:
 
 ```bash
 uv run python tools/qualify_telegram_upstream.py /path/to/telegram-ai-agent \
-  --expected-sha 0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b
+  --release-tuple /srv/qualification/release-tuple.json \
+  --report-id staging-2026-10-04-001 \
+  --environment staging \
+  --output /srv/qualification/evidence/upstream-source-contract.json
 ```
 
 This verifies exact SHA, tmux naming, spawn-before-state-save ordering, and the
-sanitized `env -i` contract. It is only one input to qualification and does not
-replace real Telegram/Codex E2E or retirement race tests.
+sanitized `env -i` contract and emits the `upstream_source_contract` evidence bound
+to the exact release tuple. A local run may use `--environment local`, but that
+artifact is deliberately rejected by the production release verifier. This gate does
+not replace real Telegram/Codex E2E or retirement race tests.
 
 The deterministic retirement harness must be executed with the pinned upstream
 Python environment. It imports the exact upstream `TmuxManager` and Telegram send

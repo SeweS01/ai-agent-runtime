@@ -10,6 +10,13 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ai_agent_runtime.migration.inventory import _digest, write_json_artifact
+from ai_agent_runtime.qualification.release_gate import (
+    QUALIFICATION_EVIDENCE_SCHEMA,
+    release_tuple_digest,
+    validate_release_tuple,
+)
+
 
 def _git(checkout: Path, *args: str) -> str:
     completed = subprocess.run(
@@ -72,24 +79,77 @@ def _qualify_sanitized_environment(checkout: Path) -> dict[str, bool]:
     return {"uses_env_i": True, "runtime_config_not_allowlisted": True}
 
 
+def build_evidence(args: argparse.Namespace) -> dict[str, object]:
+    checkout = Path(args.checkout).expanduser().resolve(strict=True)
+    release_tuple = validate_release_tuple(
+        json.loads(Path(args.release_tuple).read_text(encoding="utf-8"))
+    )
+    expected_sha = str(release_tuple["telegram_agent_sha"])
+    if args.expected_sha is not None and args.expected_sha != expected_sha:
+        raise RuntimeError("--expected-sha conflicts with the release tuple")
+    actual_sha = _git(checkout, "rev-parse", "HEAD")
+    if actual_sha != expected_sha:
+        raise RuntimeError(f"wrong upstream SHA: expected {expected_sha}, got {actual_sha}")
+    if _git(checkout, "status", "--porcelain"):
+        raise RuntimeError("upstream checkout is dirty")
+
+    tmux_name = _qualify_tmux_name(checkout)
+    state_order = _qualify_state_order(checkout)
+    environment_contract = _qualify_sanitized_environment(checkout)
+    evidence: dict[str, object] = {
+        "schema": QUALIFICATION_EVIDENCE_SCHEMA,
+        "gate_id": "upstream_source_contract",
+        "report_id": args.report_id,
+        "release_tuple_digest": release_tuple_digest(release_tuple),
+        "environment": args.environment,
+        "status": "PASS",
+        "harness": {
+            "kind": "pinned-upstream-source-contract",
+            "telegram_agent_sha": actual_sha,
+            "checkout_clean": True,
+        },
+        "assertions": [
+            {
+                "id": "exact_commit",
+                "passed": True,
+                "observed_sha": actual_sha,
+            },
+            {
+                "id": "tmux_naming",
+                "passed": True,
+                "cases": tmux_name,
+            },
+            {
+                "id": "spawn_before_state_save",
+                "passed": True,
+                "positions": state_order,
+            },
+            {
+                "id": "safe_binary_launch",
+                "passed": True,
+                "contract": environment_contract,
+            },
+        ],
+    }
+    evidence["evidence_digest"] = _digest(evidence)
+    return evidence
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkout", type=Path)
-    parser.add_argument("--expected-sha", required=True)
+    parser.add_argument("--release-tuple", required=True)
+    parser.add_argument("--report-id", required=True)
+    parser.add_argument("--environment", choices=("local", "staging"), default="local")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--expected-sha")
     namespace = parser.parse_args()
-    checkout = namespace.checkout.resolve(strict=True)
-    actual_sha = _git(checkout, "rev-parse", "HEAD")
-    if actual_sha != namespace.expected_sha:
-        raise SystemExit(f"wrong upstream SHA: expected {namespace.expected_sha}, got {actual_sha}")
-    if _git(checkout, "status", "--porcelain"):
-        raise SystemExit("upstream checkout is dirty")
-    report = {
-        "upstream_sha": actual_sha,
-        "tmux_name": _qualify_tmux_name(checkout),
-        "state_order": _qualify_state_order(checkout),
-        "sanitized_environment": _qualify_sanitized_environment(checkout),
-    }
-    print(json.dumps(report, indent=2, sort_keys=True))
+    try:
+        evidence = build_evidence(namespace)
+        write_json_artifact(Path(namespace.output).expanduser(), evidence)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"upstream qualification failed: {exc}") from exc
+    print(json.dumps(evidence, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
