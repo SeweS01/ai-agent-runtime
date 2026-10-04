@@ -63,7 +63,11 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         config,
         phase_b_timeout=1.0,
         identity_verifier=lambda _identity: None,
-        child_verifier=lambda **_kwargs: {},
+        child_verifier=lambda **kwargs: {
+            "actual_codex_home": str(kwargs["codex_home"]),
+            "actual_model": kwargs["model"],
+            "actual_reasoning_effort": kwargs["reasoning_effort"],
+        },
         evidence_interval=0.01,
     )
     binding = RuntimeBinding(
@@ -165,6 +169,14 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert evidence["rollout_inode"] == rollout.stat().st_ino
     assert evidence["wrapper_identity"]["uid"] == os.getuid()
     assert str(evidence["wrapper_identity"]["executable"]["sha256"]).startswith("sha256:")
+    applied_status = daemon.store.status_report("agent-1")["bindings"][0]["instances"][0][  # type: ignore[index]
+        "applied"
+    ]
+    assert applied_status["effective"]["account_profile"] == "work"
+    assert applied_status["effective"]["actual_model"] == "gpt-test"
+    assert applied_status["effective"]["actual_reasoning_effort"] == "high"
+    assert applied_status["effective"]["session_id"] == "session-1"
+    assert applied_status["effective"]["rollout_inode"] == rollout.stat().st_ino
 
     heartbeat = await request(
         config.socket_path,

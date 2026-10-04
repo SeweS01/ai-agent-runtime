@@ -1390,6 +1390,7 @@ class RuntimeServer:
                     evidence: dict[str, object] = {
                         **process_evidence,
                         "spec_digest": spec.spec_digest,
+                        "account_profile": spec.account_profile,
                         "profile_fingerprint": expected_fingerprint,
                         "real_codex_version": _required_str(launch, "real_codex_version"),
                         "real_codex_sha256": expected_binary_digest,

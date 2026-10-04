@@ -8,7 +8,7 @@ import sqlite3
 import stat
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from ai_agent_runtime.domain import (
     DesiredSpec,
@@ -141,6 +141,55 @@ CREATE TABLE IF NOT EXISTS codex_rollout_observers (
 """
 
 _INSTANCE_HEARTBEAT_STALE_SECONDS = 10.0
+
+_PUBLIC_APPLIED_EVIDENCE_FIELDS = frozenset(
+    {
+        "account_profile",
+        "actual_codex_home",
+        "actual_model",
+        "actual_reasoning_effort",
+        "profile_fingerprint",
+        "real_codex_path",
+        "real_codex_device",
+        "real_codex_inode",
+        "real_codex_sha256",
+        "real_codex_version",
+        "child_pid",
+        "child_starttime",
+        "session_id",
+        "rollout_path",
+        "rollout_device",
+        "rollout_inode",
+        "wrapper_pid",
+        "wrapper_starttime",
+        "wrapper_identity",
+        "daemon_boot_id",
+        "connection_generation",
+        "tmux_session",
+        "tmux_pane",
+    }
+)
+
+
+def _applied_status(row: sqlite3.Row) -> dict[str, object] | None:
+    if row["verified_applied_digest"] is None:
+        return None
+    raw_evidence = row["applied_evidence_json"]
+    evidence: dict[str, Any] = {}
+    if isinstance(raw_evidence, str):
+        decoded = json.loads(raw_evidence)
+        if isinstance(decoded, dict):
+            evidence = {
+                key: value
+                for key, value in decoded.items()
+                if key in _PUBLIC_APPLIED_EVIDENCE_FIELDS
+            }
+    return {
+        "generation_id": row["applied_generation"],
+        "revision": row["applied_revision"],
+        "spec_digest": row["verified_applied_digest"],
+        "effective": evidence,
+    }
 
 
 class RuntimeStore:
@@ -1267,7 +1316,8 @@ class RuntimeStore:
                 """
                 SELECT i.*, a.generation_id AS applied_generation,
                        a.revision AS applied_revision,
-                       a.spec_digest AS verified_applied_digest
+                       a.spec_digest AS verified_applied_digest,
+                       a.evidence_json AS applied_evidence_json
                 FROM instances AS i
                 LEFT JOIN applied_specs AS a ON a.instance_id=i.instance_id
                 WHERE i.binding_id=?
@@ -1296,15 +1346,7 @@ class RuntimeStore:
                             > _INSTANCE_HEARTBEAT_STALE_SECONDS
                         )
                     ),
-                    "applied": (
-                        {
-                            "generation_id": row["applied_generation"],
-                            "revision": row["applied_revision"],
-                            "spec_digest": row["verified_applied_digest"],
-                        }
-                        if row["verified_applied_digest"] is not None
-                        else None
-                    ),
+                    "applied": _applied_status(row),
                     "updated_at": row["updated_at"],
                 }
                 for row in rows
