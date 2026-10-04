@@ -23,6 +23,7 @@ from ai_agent_runtime.migration.inventory import (
     write_inventory,
     write_json_artifact,
 )
+from ai_agent_runtime.migration.session_storage import build_session_storage_manifest
 from ai_agent_runtime.process_safety import validate_owned_executable
 from ai_agent_runtime.state.store import RuntimeStore
 from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
@@ -127,6 +128,44 @@ def _inventory_plan_bindings(*, inventory: str, generation_id: str, output: str)
     return 0 if plan["accepted"] else 1
 
 
+def _parse_profiles(values: list[str]) -> dict[str, Path]:
+    profiles: dict[str, Path] = {}
+    for value in values:
+        name, separator, raw_path = value.partition("=")
+        if not separator or not name or not raw_path or name in profiles:
+            raise InventoryError("--profile must be a unique NAME=/absolute/path pair")
+        profiles[name] = Path(raw_path).expanduser()
+    return profiles
+
+
+def _storage_manifest(
+    *,
+    profiles: list[str],
+    shared_root: str,
+    includes: list[str],
+    output: str,
+) -> int:
+    manifest = build_session_storage_manifest(
+        profiles=_parse_profiles(profiles),
+        shared_root=Path(shared_root).expanduser(),
+        includes=tuple(includes) if includes else ("sessions", "archived_sessions"),
+    )
+    target = Path(output).expanduser()
+    write_json_artifact(target, manifest)
+    print(
+        json.dumps(
+            {
+                "output": str(target),
+                "manifest_digest": manifest["manifest_digest"],
+                "status": manifest["status"],
+                "qualified": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if not manifest["collisions"] else 1
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -153,6 +192,13 @@ def main() -> None:
     inventory_plan.add_argument("--inventory", required=True)
     inventory_plan.add_argument("--generation-id", required=True)
     inventory_plan.add_argument("--output", required=True)
+    storage = commands.add_parser("storage")
+    storage_commands = storage.add_subparsers(dest="storage_command", required=True)
+    storage_manifest = storage_commands.add_parser("manifest")
+    storage_manifest.add_argument("--profile", action="append", default=[], required=True)
+    storage_manifest.add_argument("--shared-root", required=True)
+    storage_manifest.add_argument("--include-relative", action="append", default=[])
+    storage_manifest.add_argument("--output", required=True)
     namespace = parser.parse_args()
     try:
         config = _load_config(namespace.config)
@@ -191,6 +237,15 @@ def main() -> None:
                         output=namespace.output,
                     )
                 )
+        if namespace.command == "storage" and namespace.storage_command == "manifest":
+            raise SystemExit(
+                _storage_manifest(
+                    profiles=namespace.profile,
+                    shared_root=namespace.shared_root,
+                    includes=namespace.include_relative,
+                    output=namespace.output,
+                )
+            )
     except (InventoryError, OSError, ValueError) as exc:
         print(f"ai-agent-runtime: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

@@ -7,10 +7,12 @@ from ai_agent_runtime.migration.inventory import (
     read_inventory,
     write_inventory,
 )
+from ai_agent_runtime.migration.session_storage import build_session_storage_manifest
 
 __all__ = [
     "build_binding_migration_plan",
     "build_inventory",
+    "build_session_storage_manifest",
     "compare_inventories",
     "read_inventory",
     "write_inventory",

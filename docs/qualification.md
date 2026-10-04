@@ -35,3 +35,25 @@ uv run python tools/qualify_telegram_upstream.py /path/to/telegram-ai-agent \
 This verifies exact SHA, tmux naming, spawn-before-state-save ordering, and the
 sanitized `env -i` contract. It is only one input to qualification and does not
 replace real Telegram/Codex E2E or retirement race tests.
+
+## Session-storage topology manifest
+
+Before testing a shared-session candidate, create a non-destructive manifest for
+every account profile. The default includes are `sessions` and
+`archived_sessions`; add exact relative index/state paths discovered for the pinned
+Codex version rather than assuming their names.
+
+```bash
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml storage manifest \
+  --profile work=/home/devops/.ai_profiles/codex/work \
+  --profile personal=/home/devops/.ai_profiles/codex/personal \
+  --shared-root /home/devops/.codex-shared \
+  --include-relative index.sqlite \
+  --output /var/lib/ai-agent-runtime/migration/session-storage.json
+```
+
+The command reads metadata and hashes only, never follows a session symlink, rejects
+credential paths, performs no copy/link/delete, and creates a `0600` artifact without
+overwrite. Any cross-profile or pre-existing-target path collision blocks the
+candidate. A collision-free manifest remains `qualified=false`: real start/resume,
+archive/index/state, concurrent-account and rollback tests are still mandatory.
