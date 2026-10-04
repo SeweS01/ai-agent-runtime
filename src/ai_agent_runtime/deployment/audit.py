@@ -13,6 +13,7 @@ from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.errors import RuntimeFailureError
 from ai_agent_runtime.ipc.protocol import PROTOCOL_MAJOR
 from ai_agent_runtime.migration.inventory import InventoryError, _digest
+from ai_agent_runtime.migration.rollback import verify_rollback_manifest
 from ai_agent_runtime.process_safety import file_sha256, validate_owned_executable
 from ai_agent_runtime.qualification.release_gate import verify_qualification_manifest
 
@@ -21,6 +22,7 @@ DEPLOYMENT_AUDIT_SCHEMA: Final = "ai-agent-runtime.deployment-audit.v1"
 _MAX_MANIFEST_BYTES: Final = 4 * 1024 * 1024
 
 QualificationVerifier = Callable[[Path], dict[str, object]]
+RollbackVerifier = Callable[[Path], dict[str, object]]
 GitHeadReader = Callable[[Path], str]
 
 
@@ -201,6 +203,7 @@ def audit_deployment_manifest(
     path: Path,
     *,
     qualification_verifier: QualificationVerifier = verify_qualification_manifest,
+    rollback_verifier: RollbackVerifier = verify_rollback_manifest,
     git_head_reader: GitHeadReader = _git_head,
 ) -> dict[str, object]:
     """Validate captured deployment inputs without mutating services or files."""
@@ -213,6 +216,7 @@ def audit_deployment_manifest(
     expected_manifest_fields = {
         "schema",
         "qualification_manifest",
+        "rollback_manifest",
         "agent_instances",
         "manifest_digest",
     }
@@ -238,6 +242,14 @@ def audit_deployment_manifest(
         errors.append("runtime_release_tuple_mismatch")
     if tuple_data.get("protocol_major") != PROTOCOL_MAJOR:
         errors.append("protocol_major_tuple_mismatch")
+    rollback_path = _absolute_file(manifest.get("rollback_manifest"), "rollback_manifest")
+    try:
+        rollback = rollback_verifier(rollback_path)
+    except (InventoryError, OSError, ValueError) as exc:
+        rollback = {"accepted": False}
+        errors.append(f"rollback_unreadable:{type(exc).__name__}")
+    if rollback.get("accepted") is not True:
+        errors.append("rollback_path_not_verified")
     raw_instances = manifest.get("agent_instances")
     if not isinstance(raw_instances, list) or not raw_instances:
         raise InventoryError("deployment manifest requires AgentInstance entries")
@@ -276,6 +288,13 @@ def audit_deployment_manifest(
         "manifest_path": str(manifest_path),
         "qualification_report_id": qualification.get("report_id"),
         "release_tuple": tuple_data,
+        "rollback": {
+            "manifest_path": str(rollback_path),
+            "manifest_digest": rollback.get("manifest_digest"),
+            "control_period_end": rollback.get("control_period_end"),
+            "control_period_active": rollback.get("control_period_active"),
+            "accepted": rollback.get("accepted") is True,
+        },
         "accepted": not errors,
         "status": "READY_FOR_STAGING" if not errors else "BLOCKED",
         "instances": instances,

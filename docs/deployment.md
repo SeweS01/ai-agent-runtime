@@ -34,6 +34,11 @@ ai-agent-runtime deployment audit \
   --output /srv/qualification/deployment-audit.json
 ```
 
+The deployment manifest pins both `qualification_manifest` and
+`rollback_manifest`. The audit refuses staging unless all release gates pass and the
+rollback verifier confirms that the exact legacy inputs are unchanged and their
+declared control period is still active.
+
 Each `agent_instances` entry identifies its Runtime config, exact Telegram checkout,
 instance-named wrapper, forum chat and one-way working-bot token fingerprint. It also
 contains captured effective Runtime service properties (`Type=notify`,

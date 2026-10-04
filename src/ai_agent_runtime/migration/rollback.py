@@ -229,6 +229,16 @@ def verify_rollback_manifest(path: Path) -> dict[str, object]:
 
     manifest = _read_manifest(path)
     failures: list[str] = []
+    raw_period_end = manifest.get("control_period_end")
+    try:
+        period_end = datetime.fromisoformat(str(raw_period_end).replace("Z", "+00:00"))
+    except ValueError:
+        period_end = None
+        failures.append("rollback control period timestamp is invalid")
+    if period_end is not None and (
+        period_end.tzinfo is None or period_end.astimezone(UTC) <= datetime.now(UTC)
+    ):
+        failures.append("rollback control period is not active")
     legacy = manifest.get("legacy")
     repository = legacy.get("repository") if isinstance(legacy, dict) else None
     if not isinstance(repository, dict):
@@ -269,6 +279,7 @@ def verify_rollback_manifest(path: Path) -> dict[str, object]:
         "manifest_path": str(path.expanduser().resolve(strict=True)),
         "manifest_digest": manifest["manifest_digest"],
         "control_period_end": manifest.get("control_period_end"),
+        "control_period_active": not any("control period" in item for item in failures),
         "checked_artifacts": checked_artifacts,
         "failures": failures,
         "production_restore_authorized": False,
