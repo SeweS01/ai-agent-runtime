@@ -72,6 +72,9 @@ def test_staging_run_plan_binds_every_gate_and_exact_release(tmp_path: Path) -> 
     assert plan["production_cutover_authorized"] is False
     gates = cast(list[dict[str, object]], plan["gates"])
     assert {str(gate["gate_id"]) for gate in gates} == set(QUALIFICATION_GATES)
+    assert "legacy_session_provenance_import" in QUALIFICATION_GATES[
+        "session_storage_lifecycle"
+    ]
     for gate in gates:
         gate_id = str(gate["gate_id"])
         assert gate["required_assertion_ids"] == list(QUALIFICATION_GATES[gate_id])

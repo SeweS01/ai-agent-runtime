@@ -79,6 +79,7 @@ QUALIFICATION_GATES: Final[dict[str, tuple[str, ...]]] = {
         "archived_sessions",
         "index_and_state",
         "concurrent_accounts",
+        "legacy_session_provenance_import",
         "same_binding_resume",
         "foreign_binding_resume_denied",
         "rollback",
