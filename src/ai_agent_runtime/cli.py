@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
+from ai_agent_runtime.deployment.audit import audit_deployment_manifest
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
@@ -210,6 +211,14 @@ def _qualification_verify(*, manifest: str, output: str | None) -> int:
     return 0 if report["accepted"] else 1
 
 
+def _deployment_audit(*, manifest: str, output: str | None) -> int:
+    report = audit_deployment_manifest(Path(manifest))
+    if output:
+        write_json_artifact(Path(output).expanduser(), report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["accepted"] else 1
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -255,6 +264,11 @@ def main() -> None:
     qualification_verify = qualification_commands.add_parser("verify")
     qualification_verify.add_argument("--manifest", required=True)
     qualification_verify.add_argument("--output")
+    deployment = commands.add_parser("deployment")
+    deployment_commands = deployment.add_subparsers(dest="deployment_command", required=True)
+    deployment_audit = deployment_commands.add_parser("audit")
+    deployment_audit.add_argument("--manifest", required=True)
+    deployment_audit.add_argument("--output")
     namespace = parser.parse_args()
     try:
         # Artifact-only commands intentionally work on an isolated staging host
@@ -282,6 +296,13 @@ def main() -> None:
                     profiles=namespace.profile,
                     shared_root=namespace.shared_root,
                     includes=namespace.include_relative,
+                    output=namespace.output,
+                )
+            )
+        if namespace.command == "deployment" and namespace.deployment_command == "audit":
+            raise SystemExit(
+                _deployment_audit(
+                    manifest=namespace.manifest,
                     output=namespace.output,
                 )
             )

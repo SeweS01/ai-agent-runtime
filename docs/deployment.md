@@ -25,6 +25,25 @@ upstream release tuple, staging evidence, and rollback manifest must be validate
 The production Telegram Agent drop-in must retain `KillMode=process` so its restart
 does not recursively destroy qualified tmux/wrapper/Codex processes.
 
+Capture the effective, secret-free deployment values in a digest-protected
+`ai-agent-runtime.deployment-manifest.v1` artifact and audit it before staging:
+
+```bash
+ai-agent-runtime deployment audit \
+  --manifest /srv/qualification/deployment-manifest.json \
+  --output /srv/qualification/deployment-audit.json
+```
+
+Each `agent_instances` entry identifies its Runtime config, exact Telegram checkout,
+instance-named wrapper, forum chat and one-way working-bot token fingerprint. It also
+contains captured effective Runtime service properties (`Type=notify`,
+`Restart=always`, 2-second restart, 30-second watchdog, private modes, `Accept=false`)
+and Telegram service properties (`KillMode=process`, exact wrapper path, Codex
+autoupdate disabled). The audit re-hashes the real Codex binary, reads the pinned Git
+HEAD, verifies the complete qualification manifest, checks namespace/path/forum/bot
+uniqueness, and performs no mutations. `READY_FOR_STAGING` explicitly does not
+authorize production cutover.
+
 # Migration M0 inventory
 
 Before switching `TELEGRAM_CODEX_BIN`, create a read-only baseline artifact for
