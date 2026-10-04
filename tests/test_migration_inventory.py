@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ai_agent_runtime.config import RuntimeConfig
+from ai_agent_runtime.migration import inventory as inventory_module
 from ai_agent_runtime.migration.inventory import (
     InventoryError,
     build_inventory,
@@ -16,6 +18,39 @@ from ai_agent_runtime.migration.inventory import (
     read_inventory,
     write_inventory,
 )
+
+
+def test_live_tmux_parser_uses_unescaped_tab_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command[-1] == inventory_module._TMUX_FORMAT
+        assert "\t" in command[-1]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="cc-n1001-42\t@1\t%1\t123\t/srv/project\t0\nmalformed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(inventory_module.subprocess, "run", fake_run)
+
+    observed = inventory_module.collect_live_tmux()
+
+    assert observed == {
+        "available": True,
+        "reason": None,
+        "panes": [
+            {
+                "session_name": "cc-n1001-42",
+                "window_id": "@1",
+                "pane_id": "%1",
+                "pane_pid": 123,
+                "cwd": "/srv/project",
+                "dead": False,
+            }
+        ],
+    }
 
 
 def _config(tmp_path: Path) -> RuntimeConfig:

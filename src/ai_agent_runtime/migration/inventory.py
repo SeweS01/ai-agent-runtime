@@ -27,8 +27,8 @@ INVENTORY_SCHEMA = "ai-agent-runtime.migration-inventory.v1"
 COMPARISON_SCHEMA = "ai-agent-runtime.migration-comparison.v1"
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _TMUX_FORMAT = (
-    "#{session_name}\x1f#{window_id}\x1f#{pane_id}\x1f"
-    "#{pane_pid}\x1f#{pane_current_path}\x1f#{pane_dead}"
+    "#{session_name}\t#{window_id}\t#{pane_id}\t"
+    "#{pane_pid}\t#{pane_current_path}\t#{pane_dead}"
 )
 
 
@@ -123,7 +123,7 @@ def collect_live_tmux() -> dict[str, object]:
         }
     panes: list[dict[str, object]] = []
     for line in result.stdout.splitlines():
-        parts = line.split("\x1f")
+        parts = line.split("\t")
         if len(parts) != 6:
             continue
         session, window_id, pane_id, pid_raw, cwd, dead_raw = parts
