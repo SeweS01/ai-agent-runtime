@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_agent_runtime.migration import session_storage as storage_module
 from ai_agent_runtime.migration.inventory import InventoryError, write_json_artifact
 from ai_agent_runtime.migration.session_storage import (
     build_session_storage_manifest,
@@ -92,6 +93,29 @@ def test_manifest_rejects_secret_include_and_never_follows_session_symlink(
             shared_root=tmp_path / "shared",
             includes=("auth.json",),
         )
+
+
+def test_manifest_hash_fails_closed_if_file_changes_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "session.jsonl"
+    source.write_bytes(b"original")
+    real_read = storage_module.os.read
+    changed = False
+
+    def changing_read(descriptor: int, size: int) -> bytes:
+        nonlocal changed
+        chunk = real_read(descriptor, size)
+        if chunk and not changed:
+            changed = True
+            source.write_bytes(b"changed-after-read")
+        return chunk
+
+    monkeypatch.setattr(storage_module.os, "read", changing_read)
+
+    with pytest.raises(InventoryError, match="changed while hashing"):
+        storage_module._file_digest(source)
 
 
 def test_stage_copies_verified_data_without_activating_or_mutating_sources(

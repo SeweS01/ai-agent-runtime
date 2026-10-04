@@ -39,9 +39,31 @@ def _relative_path(value: str) -> PurePosixPath:
 
 def _file_digest(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise InventoryError(f"session storage file cannot be opened safely: {path}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise InventoryError(f"session storage node stopped being a regular file: {path}")
+        while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise InventoryError(f"session storage file changed while hashing: {path}")
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -100,6 +122,17 @@ def _scan_path(root: Path, relative: PurePosixPath) -> dict[str, object]:
                     f"credential material appears inside included storage: {child.path}"
                 )
             visit(Path(child.path), rel / child.name)
+        after = current.lstat()
+        if (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+        ):
+            raise InventoryError(f"session storage directory changed while scanning: {current}")
 
     visit(path, relative)
     files = [entry for entry in entries if entry["type"] == "file"]
