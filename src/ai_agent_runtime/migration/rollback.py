@@ -23,7 +23,9 @@ from ai_agent_runtime.migration.inventory import InventoryError, _digest
 ROLLBACK_MANIFEST_SCHEMA: Final = "ai-agent-runtime.rollback-manifest.v1"
 ROLLBACK_VERIFICATION_SCHEMA: Final = "ai-agent-runtime.rollback-verification.v1"
 _MAX_MANIFEST_BYTES: Final = 16 * 1024 * 1024
-_MAX_ARTIFACT_BYTES: Final = 256 * 1024 * 1024
+# Qualified provider binaries can exceed 256 MiB. Hashing is streaming and the
+# one-GiB ceiling remains a fail-closed bound rather than an in-memory read limit.
+_MAX_ARTIFACT_BYTES: Final = 1024 * 1024 * 1024
 _GIT_SHA_RE: Final = re.compile(r"[0-9a-f]{40}\Z")
 _SAFE_NAME_RE: Final = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 _FORBIDDEN_PATH_NAMES: Final = {
