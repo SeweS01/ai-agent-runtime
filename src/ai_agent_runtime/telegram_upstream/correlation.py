@@ -11,18 +11,26 @@ from .tmux_state import UpstreamTmuxState
 from .topic_config import TopicConfigSnapshot
 
 
+def phase_a_identity_candidates(
+    *,
+    identity: WrapperIdentity,
+    bindings: tuple[RuntimeBinding, ...],
+) -> tuple[RuntimeBinding, ...]:
+    return tuple(
+        binding
+        for binding in bindings
+        if binding.expected_tmux_session == identity.tmux_session
+        and Path(binding.canonical_cwd).resolve() == Path(identity.cwd).resolve()
+    )
+
+
 def phase_a_correlate(
     *,
     identity: WrapperIdentity,
     bindings: tuple[RuntimeBinding, ...],
     topic_config: TopicConfigSnapshot,
 ) -> RuntimeBinding:
-    candidates = tuple(
-        binding
-        for binding in bindings
-        if binding.expected_tmux_session == identity.tmux_session
-        and Path(binding.canonical_cwd).resolve() == Path(identity.cwd).resolve()
-    )
+    candidates = phase_a_identity_candidates(identity=identity, bindings=bindings)
     if not candidates:
         raise RuntimeFailureError(
             ErrorCode.UNKNOWN_BINDING, "no binding matches tmux identity and cwd"

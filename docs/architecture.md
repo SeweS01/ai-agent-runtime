@@ -50,6 +50,10 @@ byte offset, retains metadata only, and writes an idempotent observed proposal t
 outbox when the proven settings differ from local desired state. Ordinary transcript
 text, Telegram commands, picker screens, and output silence never become evidence.
 
+Fail-closed launch paths that require a user explanation enqueue a sanitized,
+binding-scoped notification event. Runtime never receives a Telegram token and never
+sends that message itself; the CUS connector and CUS Bot remain the delivery adapter.
+
 ## Current implementation milestone
 
 The executable launch skeleton, durable/idempotent local protocol, incremental and

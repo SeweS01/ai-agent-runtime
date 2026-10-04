@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_agent_runtime.domain import ObservedSpecProposal, RuntimeBinding
+from ai_agent_runtime.domain import ObservedSpecProposal, RuntimeBinding, UserNotificationCode
 from ai_agent_runtime.state.store import RuntimeStore
 
 
@@ -74,3 +74,31 @@ def test_outbox_event_id_cannot_be_reused_with_another_payload(tmp_path: Path) -
             binding_id="binding-1",
             payload={"message": "second"},
         )
+
+
+def test_user_notification_is_sanitized_durable_and_idempotent(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    binding = store.get_binding("binding-1")
+    assert binding is not None
+    first = store.enqueue_user_notification(
+        code=UserNotificationCode.RESUME_BINDING_MISMATCH,
+        binding=binding,
+        event_ref="request-1",
+    )
+    second = store.enqueue_user_notification(
+        code=UserNotificationCode.RESUME_BINDING_MISMATCH,
+        binding=binding,
+        event_ref="request-1",
+    )
+    assert first == second
+    events = store.claim_outbox(now=100.0)
+    assert len(events) == 1
+    assert events[0]["kind"] == "USER_NOTIFICATION_REQUIRED"
+    assert events[0]["payload"] == {
+        "schema": "ai-agent-runtime.user-notification.v1",
+        "notification_code": "RESUME_BINDING_MISMATCH",
+        "agent_instance_id": "agent-1",
+        "binding_id": "binding-1",
+        "chat_id": -1001,
+        "thread_id": 42,
+    }

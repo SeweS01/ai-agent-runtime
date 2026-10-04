@@ -44,6 +44,12 @@ class CorrelationState(StrEnum):
     MISMATCH = "MISMATCH"
 
 
+class UserNotificationCode(StrEnum):
+    ONBOARDING_REQUIRED = "ONBOARDING_REQUIRED"
+    RESUME_BINDING_MISMATCH = "RESUME_BINDING_MISMATCH"
+    UNSUPPORTED_CODEX_SUBPROCESS = "UNSUPPORTED_CODEX_SUBPROCESS"
+
+
 def canonical_json(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

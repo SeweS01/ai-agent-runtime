@@ -163,6 +163,25 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert evidence is not None
     assert evidence["rollout_inode"] == rollout.stat().st_ino
 
+    mismatch_request_id = str(uuid.uuid4())
+    resume_mismatch = await request(
+        config.socket_path,
+        versioned(
+            "register",
+            mismatch_request_id,
+            agent_instance_id="agent-1",
+            resume_session_id="foreign-session",
+            **identity,
+        ),
+    )
+    assert resume_mismatch["ok"] is False
+    assert resume_mismatch["error"]["code"] == "RESUME_BINDING_MISMATCH"
+    notification_events = daemon.store.claim_outbox(now=100.0)
+    assert len(notification_events) == 1
+    assert notification_events[0]["kind"] == "USER_NOTIFICATION_REQUIRED"
+    assert notification_events[0]["payload"]["notification_code"] == ("RESUME_BINDING_MISMATCH")
+    daemon.store.acknowledge_outbox(notification_events[0]["event_id"], "ACKED")
+
     exited = await request(
         config.socket_path,
         versioned(
@@ -184,6 +203,25 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     )
     instance_status = status["status"]["bindings"][0]["instances"][0]
     assert instance_status["lifecycle"] == "EXITED"
+
+    topic_config.write_text(
+        json.dumps(
+            {
+                "topics": {
+                    "42": {
+                        "cwd": str(project),
+                        "engine": "codex",
+                        "exec_mode": "subprocess",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    daemon._reconcile_topic_config_once()
+    unsupported = daemon.store.claim_outbox(now=1000.0)
+    assert len(unsupported) == 1
+    assert unsupported[0]["payload"]["notification_code"] == ("UNSUPPORTED_CODEX_SUBPROCESS")
 
     server_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):

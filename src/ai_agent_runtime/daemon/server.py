@@ -24,6 +24,7 @@ from ai_agent_runtime.domain import (
     RolloutObservationCursor,
     RolloutObservationTarget,
     RuntimeBinding,
+    UserNotificationCode,
     WrapperIdentity,
     sha256_digest,
 )
@@ -47,7 +48,11 @@ from ai_agent_runtime.providers.codex.rollout import (
 from ai_agent_runtime.state.store import RuntimeStore
 from ai_agent_runtime.systemd_notify import notify, watchdog_loop
 from ai_agent_runtime.telegram_upstream.adapter import TelegramUpstreamAdapter
-from ai_agent_runtime.telegram_upstream.correlation import phase_a_correlate, phase_b_verify
+from ai_agent_runtime.telegram_upstream.correlation import (
+    phase_a_correlate,
+    phase_a_identity_candidates,
+    phase_b_verify,
+)
 from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
     read_topic_config,
@@ -218,12 +223,28 @@ class RuntimeServer:
         _verify_claimed_peer(identity, peer_pid=peer_pid, peer_uid=peer_uid)
         self.identity_verifier(identity)
         config_snapshot = read_topic_config(self.config.topic_config_path)
-        binding = phase_a_correlate(
-            identity=identity,
-            bindings=self.store.list_bindings(self.config.agent_instance_id),
-            topic_config=config_snapshot,
-        )
+        bindings = self.store.list_bindings(self.config.agent_instance_id)
+        try:
+            binding = phase_a_correlate(
+                identity=identity,
+                bindings=bindings,
+                topic_config=config_snapshot,
+            )
+        except RuntimeFailureError as exc:
+            candidates = phase_a_identity_candidates(identity=identity, bindings=bindings)
+            if exc.code is ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS and len(candidates) == 1:
+                self.store.enqueue_user_notification(
+                    code=UserNotificationCode.UNSUPPORTED_CODEX_SUBPROCESS,
+                    binding=candidates[0],
+                    event_ref=config_snapshot.digest,
+                )
+            raise
         if not binding.configured:
+            self.store.enqueue_user_notification(
+                code=UserNotificationCode.ONBOARDING_REQUIRED,
+                binding=binding,
+                event_ref=config_snapshot.digest,
+            )
             raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "binding is not configured")
         effective = self.store.get_effective_spec(binding.binding_id)
         if effective is None:
@@ -241,6 +262,11 @@ class RuntimeServer:
                 raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "invalid resume session id")
             owner = self.store.session_owner(resume_session_id)
             if owner != (binding.binding_id, spec.account_profile):
+                self.store.enqueue_user_notification(
+                    code=UserNotificationCode.RESUME_BINDING_MISMATCH,
+                    binding=binding,
+                    event_ref=resume_session_id,
+                )
                 raise RuntimeFailureError(
                     ErrorCode.RESUME_BINDING_MISMATCH,
                     "session does not belong to this binding and account",
@@ -924,31 +950,38 @@ class RuntimeServer:
 
     async def _reconcile_topic_config_loop(self) -> None:
         while True:
-            try:
-                snapshot = read_topic_config(self.config.topic_config_path)
-                for binding in self.store.list_bindings(self.config.agent_instance_id):
-                    entry = snapshot.topic(binding.thread_id)
-                    if entry is None:
-                        continue
-                    if entry.engine != "codex":
-                        mode = ManagementMode.UNMANAGED
-                    elif entry.exec_mode != "tmux":
-                        mode = ManagementMode.UNSUPPORTED_CODEX_SUBPROCESS
-                    elif (
-                        entry.cwd is not None
-                        and Path(entry.cwd).resolve() == Path(binding.canonical_cwd).resolve()
-                    ):
-                        mode = ManagementMode.MANAGED
-                    else:
-                        continue
-                    self.store.update_binding_observation(
-                        binding.binding_id,
-                        config_digest=snapshot.digest,
-                        management_mode=mode,
-                    )
-            except (OSError, ValueError):
-                pass
+            with contextlib.suppress(OSError, ValueError):
+                self._reconcile_topic_config_once()
             await asyncio.sleep(1.0)
+
+    def _reconcile_topic_config_once(self) -> None:
+        snapshot = read_topic_config(self.config.topic_config_path)
+        for binding in self.store.list_bindings(self.config.agent_instance_id):
+            entry = snapshot.topic(binding.thread_id)
+            if entry is None:
+                continue
+            if entry.engine != "codex":
+                mode = ManagementMode.UNMANAGED
+            elif entry.exec_mode != "tmux":
+                mode = ManagementMode.UNSUPPORTED_CODEX_SUBPROCESS
+            elif (
+                entry.cwd is not None
+                and Path(entry.cwd).resolve() == Path(binding.canonical_cwd).resolve()
+            ):
+                mode = ManagementMode.MANAGED
+            else:
+                continue
+            self.store.update_binding_observation(
+                binding.binding_id,
+                config_digest=snapshot.digest,
+                management_mode=mode,
+            )
+            if mode == ManagementMode.UNSUPPORTED_CODEX_SUBPROCESS:
+                self.store.enqueue_user_notification(
+                    code=UserNotificationCode.UNSUPPORTED_CODEX_SUBPROCESS,
+                    binding=binding,
+                    event_ref=snapshot.digest,
+                )
 
     async def _collect_applied_evidence_loop(self) -> None:
         while True:

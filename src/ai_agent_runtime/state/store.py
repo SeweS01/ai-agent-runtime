@@ -18,6 +18,7 @@ from ai_agent_runtime.domain import (
     RolloutObservationCursor,
     RolloutObservationTarget,
     RuntimeBinding,
+    UserNotificationCode,
     sha256_digest,
 )
 
@@ -1085,6 +1086,36 @@ class RuntimeStore:
             payload=proposal.payload(),
         )
         return proposal.event_id
+
+    def enqueue_user_notification(
+        self,
+        *,
+        code: UserNotificationCode,
+        binding: RuntimeBinding,
+        event_ref: str,
+    ) -> str:
+        """Persist a sanitized, binding-scoped CUS Bot notification request."""
+
+        identity: dict[str, object] = {
+            "code": code.value,
+            "binding_id": binding.binding_id,
+            "event_ref": event_ref,
+        }
+        event_id = f"notice:{sha256_digest(identity)[7:]}"
+        self.enqueue_outbox(
+            event_id=event_id,
+            kind="USER_NOTIFICATION_REQUIRED",
+            binding_id=binding.binding_id,
+            payload={
+                "schema": "ai-agent-runtime.user-notification.v1",
+                "notification_code": code.value,
+                "agent_instance_id": binding.agent_instance_id,
+                "binding_id": binding.binding_id,
+                "chat_id": binding.chat_id,
+                "thread_id": binding.thread_id,
+            },
+        )
+        return event_id
 
     def enqueue_outbox(
         self,

@@ -66,3 +66,11 @@ lease. `outbox_ack` finalizes an event as `ACKED`, `STALE_OBSERVED`, or
 `POLICY_REJECTED`; replaying the same ACK is idempotent, while changing a final ACK
 is rejected. Observed proposals carry their base generation/revision/digest so CUS
 can reject delayed state rather than overwrite a newer user choice.
+
+Runtime also emits sanitized `USER_NOTIFICATION_REQUIRED` events for
+`ONBOARDING_REQUIRED`, `RESUME_BINDING_MISMATCH`, and
+`UNSUPPORTED_CODEX_SUBPROCESS`. Their immutable identity is binding-scoped and
+derived from a stable local event reference, so wrapper retries and daemon restarts
+cannot create duplicate notification requests. Payloads contain only the exact
+AgentInstance/topic identity and a fixed notification code; CUS owns the user-facing
+message text and Telegram delivery.
