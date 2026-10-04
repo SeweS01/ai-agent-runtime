@@ -36,11 +36,17 @@ The release tuple JSON has exactly these fields:
   "telegram_agent_sha": "<40 lowercase hex>",
   "codex_version": "<exact version>",
   "codex_binary_sha256": "sha256:<64 lowercase hex>",
-  "runtime_release": "<exact release>",
+  "runtime_release": "<exact installed release_id, including immutable source identity>",
   "protocol_major": 1,
   "cus_connector_version": "<exact connector release>"
 }
 ```
+
+`runtime_release` is not merely the Python package version. It must equal the
+`release_id` in the verified Runtime install report (for example,
+`runtime-0.1.0-bb527eb7ab87`). This binds all qualification evidence to one
+side-by-side installed wheel; evidence for another build carrying the same package
+version is rejected by the deployment audit.
 
 Pin the already-produced evidence files into an immutable manifest, repeating
 `--evidence` once for every required gate, then verify it:

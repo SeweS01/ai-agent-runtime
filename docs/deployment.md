@@ -95,7 +95,9 @@ pins the verified wheel/install report, `qualification_manifest`, and
 `runtime_executable`; its captured Runtime service must expose `exec_start` as the
 four-item argv list `[runtime_executable, "--config", config_path, "serve"]`. The
 auditor resolves both instance-named Runtime/wrapper paths back to the executables in
-that install report, so a different or incomplete release cannot pass. For `staging`, the
+that install report. The qualification tuple's `runtime_release` must also equal the
+install report's exact `release_id`, not just the package version, so evidence cannot
+be reused for a different wheel built as the same semantic version. For `staging`, the
 qualification manifest must be structurally valid and bound to the exact tuple, but
 its only permitted errors are missing evidence gates: those are the tests staging is
 being created to run. Existing invalid/tampered evidence still blocks deployment.

@@ -8,7 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
-from ai_agent_runtime import __version__
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.deployment.install import verify_runtime_install_report
 from ai_agent_runtime.errors import RuntimeFailureError
@@ -325,7 +324,7 @@ def audit_deployment_manifest(
         errors.append("qualification_manifest_not_prepared")
     tuple_value = qualification.get("release_tuple")
     tuple_data = tuple_value if isinstance(tuple_value, dict) else {}
-    if tuple_data.get("runtime_release") != __version__:
+    if tuple_data.get("runtime_release") != install_verification.get("release_id"):
         errors.append("runtime_release_tuple_mismatch")
     if tuple_data.get("protocol_major") != PROTOCOL_MAJOR:
         errors.append("protocol_major_tuple_mismatch")

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from ai_agent_runtime import __version__
 from ai_agent_runtime.deployment.audit import (
     DEPLOYMENT_MANIFEST_SCHEMA,
     audit_deployment_manifest,
@@ -130,7 +129,7 @@ def _qualified() -> dict[str, object]:
             "telegram_agent_sha": "0" * 40,
             "codex_version": "0.156.1",
             "codex_binary_sha256": "placeholder",
-            "runtime_release": __version__,
+            "runtime_release": "runtime-release",
             "protocol_major": 1,
             "cus_connector_version": "runtime-v1",
         },
@@ -357,3 +356,26 @@ def test_deployment_audit_blocks_unverified_rollback_path(tmp_path: Path) -> Non
     )
     assert report["accepted"] is False
     assert "rollback_path_not_verified" in report["errors"]
+
+
+def test_deployment_audit_binds_qualification_to_exact_installed_release(
+    tmp_path: Path,
+) -> None:
+    path = _manifest(tmp_path, [_instance(tmp_path)])
+
+    def other_runtime_release(qualification_path: Path) -> dict[str, object]:
+        result = _verifier_for(qualification_path)
+        release_tuple = result["release_tuple"]
+        assert isinstance(release_tuple, dict)
+        release_tuple["runtime_release"] = "runtime-release-other-wheel"
+        return result
+
+    report = audit_deployment_manifest(
+        path,
+        qualification_verifier=other_runtime_release,
+        rollback_verifier=_rollback_verified,
+        git_head_reader=lambda _path: "0" * 40,
+    )
+
+    assert report["accepted"] is False
+    assert "runtime_release_tuple_mismatch" in report["errors"]
