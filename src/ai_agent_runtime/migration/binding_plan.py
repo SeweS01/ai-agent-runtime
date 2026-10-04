@@ -191,9 +191,7 @@ def build_binding_migration_plan(
                 cwd_projects[cwd][entry_project_id].append(entry_source_ref)
 
     duplicate_binding_ids = {
-        binding_id: sorted(refs)
-        for binding_id, refs in binding_sources.items()
-        if len(refs) > 1
+        binding_id: sorted(refs) for binding_id, refs in binding_sources.items() if len(refs) > 1
     }
     conflicting_projects = {
         cwd: {project_id: sorted(refs) for project_id, refs in projects.items()}

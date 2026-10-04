@@ -173,9 +173,7 @@ def test_compare_blocks_lost_added_or_rebound_topic(tmp_path: Path) -> None:
     assert report["field_changes"] == [
         {
             "source_ref": "agent-1/-1001/42",
-            "changes": {
-                "canonical_cwd": {"before": str(_first), "after": str(second)}
-            },
+            "changes": {"canonical_cwd": {"before": str(_first), "after": str(second)}},
         }
     ]
 

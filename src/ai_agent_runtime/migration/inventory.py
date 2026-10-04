@@ -364,9 +364,7 @@ def build_inventory(
                 issues.append("BINDING_CWD_MISMATCH")
         topics.append(
             {
-                "source_ref": (
-                    f"{config.agent_instance_id}/{config.forum_chat_id}/{thread_id}"
-                ),
+                "source_ref": (f"{config.agent_instance_id}/{config.forum_chat_id}/{thread_id}"),
                 "agent_instance_id": config.agent_instance_id,
                 "chat_id": config.forum_chat_id,
                 "thread_id": thread_id,
@@ -399,9 +397,7 @@ def build_inventory(
         for cwd, refs in sorted(cwd_groups.items())
         if len(refs) > 1
     ]
-    known_topics = {
-        (config.forum_chat_id, cast(int, topic["thread_id"])) for topic in topics
-    }
+    known_topics = {(config.forum_chat_id, cast(int, topic["thread_id"])) for topic in topics}
     orphan_states = [
         {
             "chat_id": state.chat_id,

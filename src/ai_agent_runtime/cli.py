@@ -25,6 +25,10 @@ from ai_agent_runtime.migration.inventory import (
 )
 from ai_agent_runtime.migration.session_storage import build_session_storage_manifest
 from ai_agent_runtime.process_safety import validate_owned_executable
+from ai_agent_runtime.qualification.release_gate import (
+    build_qualification_manifest,
+    verify_qualification_manifest,
+)
 from ai_agent_runtime.state.store import RuntimeStore
 from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
@@ -81,9 +85,7 @@ def _inventory_export(
     skip_live_tmux: bool,
 ) -> int:
     live_tmux = (
-        {"available": False, "reason": "operator_skipped", "panes": []}
-        if skip_live_tmux
-        else None
+        {"available": False, "reason": "operator_skipped", "panes": []} if skip_live_tmux else None
     )
     inventory = build_inventory(
         config,
@@ -166,6 +168,48 @@ def _storage_manifest(
     return 0 if not manifest["collisions"] else 1
 
 
+def _read_release_tuple(path: str) -> dict[str, object]:
+    source = Path(path).expanduser()
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise InventoryError(f"release tuple is not valid JSON: {source}") from exc
+    if not isinstance(value, dict):
+        raise InventoryError("release tuple must be a JSON object")
+    return value
+
+
+def _qualification_manifest(
+    *, report_id: str, release_tuple: str, evidence: list[str], output: str
+) -> int:
+    manifest = build_qualification_manifest(
+        report_id=report_id,
+        release_tuple=_read_release_tuple(release_tuple),
+        evidence_paths=[Path(path) for path in evidence],
+    )
+    target = Path(output).expanduser()
+    write_json_artifact(target, manifest)
+    print(
+        json.dumps(
+            {
+                "output": str(target),
+                "manifest_digest": manifest["manifest_digest"],
+                "qualified": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _qualification_verify(*, manifest: str, output: str | None) -> int:
+    report = verify_qualification_manifest(Path(manifest))
+    if output:
+        write_json_artifact(Path(output).expanduser(), report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["accepted"] else 1
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -199,28 +243,49 @@ def main() -> None:
     storage_manifest.add_argument("--shared-root", required=True)
     storage_manifest.add_argument("--include-relative", action="append", default=[])
     storage_manifest.add_argument("--output", required=True)
+    qualification = commands.add_parser("qualification")
+    qualification_commands = qualification.add_subparsers(
+        dest="qualification_command", required=True
+    )
+    qualification_manifest = qualification_commands.add_parser("manifest")
+    qualification_manifest.add_argument("--report-id", required=True)
+    qualification_manifest.add_argument("--release-tuple", required=True)
+    qualification_manifest.add_argument("--evidence", action="append", default=[], required=True)
+    qualification_manifest.add_argument("--output", required=True)
+    qualification_verify = qualification_commands.add_parser("verify")
+    qualification_verify.add_argument("--manifest", required=True)
+    qualification_verify.add_argument("--output")
     namespace = parser.parse_args()
     try:
-        config = _load_config(namespace.config)
-        if namespace.command == "serve":
-            asyncio.run(RuntimeServer(config).serve())
-            return
-        if namespace.command == "status":
-            raise SystemExit(asyncio.run(_status(config)))
-        if namespace.command == "local-summary":
-            raise SystemExit(_local_summary(config))
-        if namespace.command == "doctor":
-            raise SystemExit(_doctor(config))
-        if namespace.command == "inventory":
-            if namespace.inventory_command == "export":
+        # Artifact-only commands intentionally work on an isolated staging host
+        # without a live Runtime configuration or daemon.
+        if namespace.command == "qualification":
+            if namespace.qualification_command == "manifest":
                 raise SystemExit(
-                    _inventory_export(
-                        config,
+                    _qualification_manifest(
+                        report_id=namespace.report_id,
+                        release_tuple=namespace.release_tuple,
+                        evidence=namespace.evidence,
                         output=namespace.output,
-                        cus_control_store=namespace.cus_control_store,
-                        skip_live_tmux=namespace.skip_live_tmux,
                     )
                 )
+            if namespace.qualification_command == "verify":
+                raise SystemExit(
+                    _qualification_verify(
+                        manifest=namespace.manifest,
+                        output=namespace.output,
+                    )
+                )
+        if namespace.command == "storage" and namespace.storage_command == "manifest":
+            raise SystemExit(
+                _storage_manifest(
+                    profiles=namespace.profile,
+                    shared_root=namespace.shared_root,
+                    includes=namespace.include_relative,
+                    output=namespace.output,
+                )
+            )
+        if namespace.command == "inventory":
             if namespace.inventory_command == "compare":
                 raise SystemExit(
                     _inventory_compare(
@@ -237,13 +302,23 @@ def main() -> None:
                         output=namespace.output,
                     )
                 )
-        if namespace.command == "storage" and namespace.storage_command == "manifest":
+        config = _load_config(namespace.config)
+        if namespace.command == "serve":
+            asyncio.run(RuntimeServer(config).serve())
+            return
+        if namespace.command == "status":
+            raise SystemExit(asyncio.run(_status(config)))
+        if namespace.command == "local-summary":
+            raise SystemExit(_local_summary(config))
+        if namespace.command == "doctor":
+            raise SystemExit(_doctor(config))
+        if namespace.command == "inventory" and namespace.inventory_command == "export":
             raise SystemExit(
-                _storage_manifest(
-                    profiles=namespace.profile,
-                    shared_root=namespace.shared_root,
-                    includes=namespace.include_relative,
+                _inventory_export(
+                    config,
                     output=namespace.output,
+                    cus_control_store=namespace.cus_control_store,
+                    skip_live_tmux=namespace.skip_live_tmux,
                 )
             )
     except (InventoryError, OSError, ValueError) as exc:

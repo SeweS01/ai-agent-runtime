@@ -20,6 +20,52 @@ Required blocking gates include:
 Failure of a gate blocks the release. It does not authorize a Telegram Agent patch,
 overlay, `.pth` shadowing, a silent UX change, or unmanaged Codex fallback.
 
+## Exact release qualification manifest
+
+Every real harness writes one JSON evidence artifact for its gate. Evidence must be
+from `environment=staging`, contain the exact required assertion IDs, carry its own
+canonical digest, and reference the digest of one exact release tuple. The retirement
+race artifact additionally records, for each deterministic injection window, either
+`exactly_once` or `explicit_not_delivered`; silent loss, duplicate execution and
+misrouting must all be explicitly false.
+
+The release tuple JSON has exactly these fields:
+
+```json
+{
+  "telegram_agent_sha": "<40 lowercase hex>",
+  "codex_version": "<exact version>",
+  "codex_binary_sha256": "sha256:<64 lowercase hex>",
+  "runtime_release": "<exact release>",
+  "protocol_major": 1,
+  "cus_connector_version": "<exact connector release>"
+}
+```
+
+Pin the already-produced evidence files into an immutable manifest, repeating
+`--evidence` once for every required gate, then verify it:
+
+```bash
+ai-agent-runtime qualification manifest \
+  --report-id staging-2026-10-04-001 \
+  --release-tuple /srv/qualification/release-tuple.json \
+  --evidence /srv/qualification/evidence/upstream-source-contract.json \
+  --evidence /srv/qualification/evidence/phase-correlation.json \
+  --evidence /srv/qualification/evidence/real-codex-launch.json \
+  --evidence /srv/qualification/evidence/rollback-drill.json \
+  --output /srv/qualification/qualification-manifest.json
+
+ai-agent-runtime qualification verify \
+  --manifest /srv/qualification/qualification-manifest.json \
+  --output /srv/qualification/qualification-report.json
+```
+
+The first command only hashes and pins evidence; it always reports
+`qualified=false`. Only `qualification verify` can produce `QUALIFIED`, and it does
+so only when every gate defined by the installed Runtime release is present, intact,
+bound to the same tuple/report, and fully passing. The report keeps
+`TELEGRAM_E2E_VERIFIED` separate and explicitly does not infer Runtime health.
+
 Runtime retirement is additionally feature-gated in configuration. It remains off by
 default; `retirement_enabled = true` is invalid without a non-empty
 `retirement_qualification_report_id`. That identifier is an audit reference, not a

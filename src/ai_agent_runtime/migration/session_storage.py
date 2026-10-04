@@ -25,12 +25,7 @@ _MAX_NODES = 250_000
 
 def _relative_path(value: str) -> PurePosixPath:
     candidate = PurePosixPath(value)
-    if (
-        not value
-        or candidate.is_absolute()
-        or ".." in candidate.parts
-        or "." in candidate.parts
-    ):
+    if not value or candidate.is_absolute() or ".." in candidate.parts or "." in candidate.parts:
         raise InventoryError(f"session storage include is unsafe: {value}")
     if any(part in _FORBIDDEN_NAMES for part in candidate.parts):
         raise InventoryError(f"session storage include targets credential material: {value}")
