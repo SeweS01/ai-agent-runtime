@@ -1,4 +1,5 @@
 import hashlib
+import threading
 from pathlib import Path
 
 import pytest
@@ -136,3 +137,40 @@ def test_supervisor_reports_child_exit_without_changing_exit_code(
     )
     assert [call["action"] for call in calls] == ["verify_started", "child_exited"]
     assert calls[1]["exit_code"] == 7
+
+
+def test_heartbeat_reconnect_increments_generation_after_daemon_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stop = threading.Event()
+    calls: list[dict[str, object]] = []
+
+    def reconnect(_config: RuntimeConfig, payload: dict[str, object]) -> dict[str, object]:
+        calls.append(payload)
+        if len(calls) == 2:
+            stop.set()
+        return {"ok": True, "daemon_boot_id": "boot-2"}
+
+    monkeypatch.setattr(wrapper_main, "_try_runtime_request", reconnect)
+    monkeypatch.setattr(wrapper_main, "proc_starttime", lambda _pid: 10)
+    monkeypatch.chdir(tmp_path)
+    wrapper_main._heartbeat_worker(
+        stop,
+        config=RuntimeConfig.defaults(),
+        registration={
+            "instance_id": "instance-1",
+            "binding_id": "binding-1",
+            "tmux_pane": "%1",
+            "tmux_session": "cc-n1001-42",
+        },
+        child_pid=12345,
+        child_starttime=11,
+        initial_daemon_boot_id="boot-1",
+        interval=0.0,
+    )
+    assert len(calls) == 2
+    assert calls[0]["connection_generation"] == 1
+    assert calls[0]["previous_daemon_boot_id"] == "boot-1"
+    assert calls[1]["connection_generation"] == 2
+    assert calls[1]["previous_daemon_boot_id"] == "boot-2"

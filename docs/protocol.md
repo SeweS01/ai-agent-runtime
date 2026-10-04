@@ -74,3 +74,13 @@ derived from a stable local event reference, so wrapper retries and daemon resta
 cannot create duplicate notification requests. Payloads contain only the exact
 AgentInstance/topic identity and a fixed notification code; CUS owns the user-facing
 message text and Telegram delivery.
+
+## Live wrapper resynchronization
+
+After Phase B succeeds, wrapper sends a bounded best-effort heartbeat while the
+Codex child is alive. Every heartbeat repeats the exact wrapper/child/tmux identity,
+`connection_generation`, and the last observed `daemon_boot_id`. Runtime accepts it
+only for the matching non-exited instance and persists `last_heartbeat_at`. A changed
+daemon boot ID causes wrapper to advance its connection generation on the next
+heartbeat. Socket outages never terminate an already-running child; startup and
+Phase B remain fail closed.

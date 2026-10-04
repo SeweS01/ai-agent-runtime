@@ -11,6 +11,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -29,6 +30,8 @@ from ai_agent_runtime.providers.codex.argv import (
 )
 
 _PR_SET_PDEATHSIG = 1
+_HEARTBEAT_INTERVAL_SECONDS = 2.0
+_HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 2.0
 _INSTANCE_EXECUTABLE = re.compile(r"^codex-wrapper@([A-Za-z0-9][A-Za-z0-9_.-]{0,63})$")
 _EXIT_BY_CODE = {
     ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS.value: 70,
@@ -101,6 +104,67 @@ def _notify_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> None:
         asyncio.run(notify())
 
 
+def _try_runtime_request(
+    config: RuntimeConfig,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return a best-effort Runtime response without affecting a live child."""
+
+    async def notify() -> dict[str, Any]:
+        return await asyncio.wait_for(
+            request(config.socket_path, payload),
+            timeout=_HEARTBEAT_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    try:
+        response = asyncio.run(notify())
+    except (TimeoutError, OSError, EOFError, ValueError):
+        return None
+    return response if response.get("ok") is True else None
+
+
+def _heartbeat_worker(
+    stop: threading.Event,
+    *,
+    config: RuntimeConfig,
+    registration: dict[str, Any],
+    child_pid: int,
+    child_starttime: int,
+    initial_daemon_boot_id: str | None,
+    interval: float = _HEARTBEAT_INTERVAL_SECONDS,
+) -> None:
+    """Reconnect and resync exact live identity after daemon outages/restarts."""
+
+    previous_boot_id = initial_daemon_boot_id
+    connection_generation = 1
+    while not stop.wait(interval):
+        response = _try_runtime_request(
+            config,
+            versioned(
+                "heartbeat",
+                str(uuid.uuid4()),
+                agent_instance_id=config.agent_instance_id,
+                instance_id=registration["instance_id"],
+                binding_id=registration["binding_id"],
+                child_pid=child_pid,
+                child_starttime=child_starttime,
+                connection_generation=connection_generation,
+                previous_daemon_boot_id=previous_boot_id,
+                **_identity_payload(
+                    pane=str(registration["tmux_pane"]),
+                    session=str(registration["tmux_session"]),
+                ),
+            ),
+        )
+        if response is None:
+            continue
+        observed_boot_id = response.get("daemon_boot_id")
+        if isinstance(observed_boot_id, str) and observed_boot_id:
+            if previous_boot_id is not None and observed_boot_id != previous_boot_id:
+                connection_generation += 1
+            previous_boot_id = observed_boot_id
+
+
 def _fail(code: str, detail: str) -> NoReturn:
     print(f"codex-wrapper: {code}: {detail}", file=sys.stderr)
     raise SystemExit(_EXIT_BY_CODE.get(code, 78))
@@ -149,6 +213,8 @@ def _run_supervised(
     )
     child_starttime = proc_starttime(child.pid)
     terminate_requested = False
+    heartbeat_stop: threading.Event | None = None
+    heartbeat_thread: threading.Thread | None = None
 
     def handle_termination(_signum: int, _frame: object) -> None:
         nonlocal terminate_requested
@@ -174,10 +240,31 @@ def _run_supervised(
             ),
         )
         try:
-            _call_runtime(config, verification)
+            verification_response = _call_runtime(config, verification)
         except SystemExit:
             _terminate_group(child)
             raise
+        raw_boot_id = (
+            verification_response.get("daemon_boot_id")
+            if isinstance(verification_response, dict)
+            else None
+        )
+        initial_boot_id = raw_boot_id if isinstance(raw_boot_id, str) else None
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat_worker,
+            kwargs={
+                "stop": heartbeat_stop,
+                "config": config,
+                "registration": registration,
+                "child_pid": child.pid,
+                "child_starttime": child_starttime,
+                "initial_daemon_boot_id": initial_boot_id,
+            },
+            name=f"codex-wrapper-heartbeat-{child.pid}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         if terminate_requested:
             _terminate_group(child)
             return 128 + signal.SIGTERM
@@ -188,6 +275,10 @@ def _run_supervised(
             time.sleep(0.1)
         return int(child.returncode or 0)
     finally:
+        if heartbeat_stop is not None:
+            heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=_HEARTBEAT_REQUEST_TIMEOUT_SECONDS + 0.5)
         if child.poll() is not None:
             _notify_runtime(
                 config,

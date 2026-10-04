@@ -9,6 +9,7 @@ import socket
 import stat
 import struct
 import subprocess
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
@@ -160,6 +161,8 @@ class RuntimeServer:
                 response = await self._verify_started(request_id, payload, peer_pid, peer_uid)
             elif action == "child_exited":
                 response = self._child_exited(request_id, payload, peer_pid, peer_uid)
+            elif action == "heartbeat":
+                response = self._heartbeat(request_id, payload, peer_pid, peer_uid)
             elif action == "status":
                 response = self._ok(
                     request_id,
@@ -902,6 +905,7 @@ class RuntimeServer:
             # session's rollout identity is not necessarily durable yet.
             # AppliedSpec remains unset until rollout evidence is collected.
             applied_digest=None,
+            heartbeat_at=time.time(),
         )
         return self._ok(
             request_id,
@@ -909,6 +913,56 @@ class RuntimeServer:
             applied=False,
             session_id=state.session_id,
             expected_spec_digest=spec.spec_digest,
+        )
+
+    def _heartbeat(
+        self,
+        request_id: str,
+        payload: dict[str, Any],
+        peer_pid: int,
+        peer_uid: int,
+    ) -> dict[str, Any]:
+        if payload.get("agent_instance_id") != self.config.agent_instance_id:
+            raise RuntimeFailureError(ErrorCode.UNKNOWN_BINDING, "AgentInstance namespace mismatch")
+        connection_generation = _required_int(payload, "connection_generation")
+        if connection_generation < 1:
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "connection_generation must be positive",
+            )
+        previous_boot_id = payload.get("previous_daemon_boot_id")
+        if previous_boot_id is not None and (
+            not isinstance(previous_boot_id, str) or not previous_boot_id
+        ):
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST,
+                "previous_daemon_boot_id must be null or non-empty string",
+            )
+        identity = _identity(payload)
+        _verify_claimed_peer(identity, peer_pid=peer_pid, peer_uid=peer_uid)
+        self.identity_verifier(identity)
+        try:
+            lifecycle, heartbeat_at = self.store.heartbeat_instance(
+                instance_id=_required_str(payload, "instance_id"),
+                binding_id=_required_str(payload, "binding_id"),
+                wrapper_pid=identity.pid,
+                wrapper_starttime=identity.starttime,
+                child_pid=_required_int(payload, "child_pid"),
+                child_starttime=_required_int(payload, "child_starttime"),
+                tmux_session=identity.tmux_session,
+                tmux_pane=identity.tmux_pane,
+            )
+        except KeyError as exc:
+            raise RuntimeFailureError(
+                ErrorCode.CORRELATION_MISMATCH,
+                "heartbeat does not match a registered live instance",
+            ) from exc
+        return self._ok(
+            request_id,
+            heartbeat_at=heartbeat_at,
+            lifecycle=lifecycle,
+            connection_generation=connection_generation,
+            resynchronized=(previous_boot_id is not None and previous_boot_id != self.boot_id),
         )
 
     def _child_exited(

@@ -53,7 +53,10 @@ def test_pinned_upstream_retirement_fault_matrix_is_safe(tmp_path: Path) -> None
         cwd=RUNTIME_ROOT,
         capture_output=True,
         text=True,
-        timeout=60,
+        # Importing the pinned upstream environment dominates this subprocess
+        # and can exceed one minute on a loaded CI host. The scenarios
+        # themselves remain deterministic and internally bounded.
+        timeout=180,
         check=False,
     )
     assert result.returncode == 0, result.stderr

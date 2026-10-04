@@ -163,6 +163,65 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert evidence is not None
     assert evidence["rollout_inode"] == rollout.stat().st_ino
 
+    heartbeat = await request(
+        config.socket_path,
+        versioned(
+            "heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid),
+            connection_generation=1,
+            previous_daemon_boot_id=verified["daemon_boot_id"],
+            **identity,
+        ),
+    )
+    assert heartbeat["ok"] is True
+    assert heartbeat["resynchronized"] is False
+    assert heartbeat["connection_generation"] == 1
+    live_status = daemon.store.status_report("agent-1")["bindings"][0]  # type: ignore[index]
+    assert live_status["instances"][0]["last_heartbeat_at"] is not None  # type: ignore[index]
+
+    resynchronized = await request(
+        config.socket_path,
+        versioned(
+            "heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid),
+            connection_generation=2,
+            previous_daemon_boot_id="retired-daemon-boot-id",
+            **identity,
+        ),
+    )
+    assert resynchronized["ok"] is True
+    assert resynchronized["resynchronized"] is True
+    assert resynchronized["daemon_boot_id"] == daemon.boot_id
+    assert resynchronized["connection_generation"] == 2
+
+    wrong_heartbeat = await request(
+        config.socket_path,
+        versioned(
+            "heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid) + 1,
+            connection_generation=1,
+            previous_daemon_boot_id=verified["daemon_boot_id"],
+            **identity,
+        ),
+    )
+    assert wrong_heartbeat["ok"] is False
+    assert wrong_heartbeat["error"]["code"] == "CORRELATION_MISMATCH"
+
     mismatch_request_id = str(uuid.uuid4())
     resume_mismatch = await request(
         config.socket_path,

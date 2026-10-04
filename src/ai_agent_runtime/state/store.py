@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS instances (
     lifecycle TEXT NOT NULL,
     applied_digest TEXT,
     launch_spec_json TEXT,
+    last_heartbeat_at REAL,
     updated_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS outbox (
@@ -141,6 +142,7 @@ class RuntimeStore:
             "TEXT NOT NULL DEFAULT 'MANAGED'",
         )
         self._ensure_column("instances", "launch_spec_json", "TEXT")
+        self._ensure_column("instances", "last_heartbeat_at", "REAL")
         self._ensure_column("codex_rollout_observers", "active_turn_id", "TEXT")
         self._ensure_column("codex_rollout_observers", "pending_model", "TEXT")
         self._ensure_column("codex_rollout_observers", "pending_reasoning_effort", "TEXT")
@@ -526,6 +528,7 @@ class RuntimeStore:
         lifecycle: str,
         applied_digest: str | None,
         launch_spec: dict[str, object] | None = None,
+        heartbeat_at: float | None = None,
     ) -> None:
         encoded_launch = (
             json.dumps(launch_spec, sort_keys=True, separators=(",", ":"))
@@ -538,8 +541,8 @@ class RuntimeStore:
                 INSERT INTO instances(
                     instance_id, binding_id, wrapper_pid, wrapper_starttime, child_pid,
                     child_starttime, tmux_session, tmux_pane, lifecycle, applied_digest,
-                    launch_spec_json, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    launch_spec_json, last_heartbeat_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(instance_id) DO UPDATE SET
                     child_pid=excluded.child_pid,
                     child_starttime=excluded.child_starttime,
@@ -548,6 +551,10 @@ class RuntimeStore:
                     launch_spec_json=COALESCE(
                         excluded.launch_spec_json,
                         instances.launch_spec_json
+                    ),
+                    last_heartbeat_at=COALESCE(
+                        excluded.last_heartbeat_at,
+                        instances.last_heartbeat_at
                     ),
                     updated_at=excluded.updated_at
                 """,
@@ -563,9 +570,55 @@ class RuntimeStore:
                     lifecycle,
                     applied_digest,
                     encoded_launch,
+                    heartbeat_at,
                     time.time(),
                 ),
             )
+
+    def heartbeat_instance(
+        self,
+        *,
+        instance_id: str,
+        binding_id: str,
+        wrapper_pid: int,
+        wrapper_starttime: int,
+        child_pid: int,
+        child_starttime: int,
+        tmux_session: str,
+        tmux_pane: str,
+    ) -> tuple[str, float]:
+        heartbeat_at = time.time()
+        with self._connection:
+            row = self._connection.execute(
+                """
+                SELECT lifecycle FROM instances
+                WHERE instance_id=? AND binding_id=?
+                  AND wrapper_pid=? AND wrapper_starttime=?
+                  AND child_pid=? AND child_starttime=?
+                  AND tmux_session=? AND tmux_pane=?
+                  AND lifecycle NOT IN ('EXITED', 'RETIRED_FOR_RESTART')
+                """,
+                (
+                    instance_id,
+                    binding_id,
+                    wrapper_pid,
+                    wrapper_starttime,
+                    child_pid,
+                    child_starttime,
+                    tmux_session,
+                    tmux_pane,
+                ),
+            ).fetchone()
+            if row is None:
+                raise KeyError("heartbeat identity does not match a live instance")
+            self._connection.execute(
+                """
+                UPDATE instances SET last_heartbeat_at=?, updated_at=?
+                WHERE instance_id=?
+                """,
+                (heartbeat_at, heartbeat_at, instance_id),
+            )
+        return str(row["lifecycle"]), heartbeat_at
 
     def get_registered_instance(self, instance_id: str) -> RegisteredInstance | None:
         row = self._connection.execute(
@@ -1027,6 +1080,7 @@ class RuntimeStore:
                     "wrapper_starttime": row["wrapper_starttime"],
                     "child_pid": row["child_pid"],
                     "child_starttime": row["child_starttime"],
+                    "last_heartbeat_at": row["last_heartbeat_at"],
                     "applied": (
                         {
                             "generation_id": row["applied_generation"],
