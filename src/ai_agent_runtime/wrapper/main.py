@@ -72,6 +72,42 @@ def _tmux_identity(pane: str) -> str:
     return session
 
 
+def _tmux_identity_from_controlling_tty() -> tuple[str, str]:
+    """Recover the exact tmux pane when a sanitized launcher removed TMUX_PANE.
+
+    Pinned Telegram Agent starts the configured Codex binary through ``env -i``.
+    tmux sets ``TMUX_PANE`` for its child, but that intermediate command removes
+    the variable before execing the wrapper.  The controlling PTY survives the
+    sanitization and tmux exposes the same PTY for every pane, so require one
+    exact match and independently verify its session before accepting it.
+    """
+
+    controlling_tty = os.path.realpath(os.ttyname(0))
+    completed = subprocess.run(
+        ("tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{pane_tty}\t#{session_name}"),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    matches: list[tuple[str, str]] = []
+    for raw_line in completed.stdout.splitlines():
+        fields = raw_line.split("\t")
+        if len(fields) != 3:
+            continue
+        pane, pane_tty, session = fields
+        if os.path.realpath(pane_tty) == controlling_tty:
+            matches.append((pane, session))
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"controlling TTY maps to {len(matches)} tmux panes; expected exactly one"
+        )
+    pane, session = matches[0]
+    if not pane or not session or _tmux_identity(pane) != session:
+        raise RuntimeError("tmux pane/session verification failed")
+    return pane, session
+
+
 def _child_setup(expected_parent_pid: int) -> None:
     # A new process group permits bounded group termination while retaining the
     # pane's controlling terminal, which Codex TUI requires.
@@ -332,15 +368,19 @@ def run(argv: list[str]) -> int:
     config.validate()
 
     pane = os.environ.get("TMUX_PANE")
-    if not pane:
-        _fail(
-            ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS.value,
-            "managed Codex requires a Telegram Agent tmux pane in Runtime V1",
-        )
-    try:
-        session = _tmux_identity(pane)
-    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-        _fail(ErrorCode.UNKNOWN_BINDING.value, f"cannot prove tmux identity: {exc}")
+    if pane:
+        try:
+            session = _tmux_identity(pane)
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            _fail(ErrorCode.UNKNOWN_BINDING.value, f"cannot prove tmux identity: {exc}")
+    else:
+        try:
+            pane, session = _tmux_identity_from_controlling_tty()
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            _fail(
+                ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS.value,
+                f"managed Codex requires a proven Telegram Agent tmux pane: {exc}",
+            )
     identity = _identity_payload(pane=pane, session=session)
     register = versioned(
         "register",

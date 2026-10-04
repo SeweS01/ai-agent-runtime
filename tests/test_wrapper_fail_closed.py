@@ -73,10 +73,63 @@ allowed_project_roots = ["{tmp_path}"]
     )
     monkeypatch.setenv("AI_AGENT_RUNTIME_CONFIG", str(config))
     monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setattr(
+        wrapper_main.os,
+        "ttyname",
+        lambda _fd: (_ for _ in ()).throw(OSError("not a tty")),
+    )
     with pytest.raises(SystemExit) as failure:
         run([])
     assert failure.value.code == 70
     assert not marker.exists()
+
+
+def test_tmux_identity_recovers_from_controlling_tty_after_env_sanitization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Completed:
+        stdout = "%4\t/dev/pts/4\tother-session\n%12\t/dev/pts/12\tcc-n1001-42\n"
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: tuple[str, ...], **_kwargs: object) -> Completed:
+        calls.append(argv)
+        return Completed()
+
+    monkeypatch.setattr(wrapper_main.os, "ttyname", lambda _fd: "/dev/pts/12")
+    monkeypatch.setattr(wrapper_main.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        wrapper_main,
+        "_tmux_identity",
+        lambda pane: "cc-n1001-42" if pane == "%12" else "unexpected",
+    )
+
+    assert wrapper_main._tmux_identity_from_controlling_tty() == (
+        "%12",
+        "cc-n1001-42",
+    )
+    assert calls == [
+        (
+            "tmux",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{pane_tty}\t#{session_name}",
+        )
+    ]
+
+
+def test_tmux_identity_recovery_rejects_ambiguous_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Completed:
+        stdout = "%1\t/dev/pts/9\tone\n%2\t/dev/pts/9\ttwo\n"
+
+    monkeypatch.setattr(wrapper_main.os, "ttyname", lambda _fd: "/dev/pts/9")
+    monkeypatch.setattr(wrapper_main.subprocess, "run", lambda *_args, **_kwargs: Completed())
+
+    with pytest.raises(RuntimeError, match="maps to 2 tmux panes"):
+        wrapper_main._tmux_identity_from_controlling_tty()
 
 
 def test_version_is_answered_locally_without_running_real_codex(
