@@ -129,6 +129,17 @@ def test_inventory_is_secret_free_digested_and_preserves_binding_scope(tmp_path:
         generated_at=datetime(2026, 10, 3, tzinfo=UTC),
     )
     assert len(inventory["topics"]) == 2  # type: ignore[arg-type]
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    assert [topic["shadow_confidence"] for topic in topics] == [
+        "OBSERVED_PARTIAL",
+        "OBSERVED_PARTIAL",
+    ]
+    assert inventory["shadow_confidence_counts"] == {
+        "OBSERVED_VERIFIED": 0,
+        "OBSERVED_PARTIAL": 2,
+        "UNKNOWN": 0,
+    }
     shared = inventory["shared_canonical_cwds"]
     assert isinstance(shared, list) and len(shared) == 1
     assert len(shared[0]["source_refs"]) == 2
@@ -209,3 +220,60 @@ def test_inventory_uses_agent_instance_tmux_prefix(tmp_path: Path) -> None:
     topics = inventory["topics"]
     assert isinstance(topics, list)
     assert topics[0]["expected_tmux_session"] == "prod-a-n1001-42"
+
+
+def test_shadow_confidence_requires_exact_state_and_live_pane(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first, _second = _write_sources(config)
+    inventory = build_inventory(
+        config,
+        live_tmux={
+            "available": True,
+            "reason": None,
+            "panes": [
+                {
+                    "session_name": "cc-n1001-42",
+                    "window_id": "@1",
+                    "pane_id": "%1",
+                    "pane_pid": 123,
+                    "cwd": str(first),
+                    "dead": False,
+                }
+            ],
+        },
+    )
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    assert topics[0]["shadow_confidence"] == "OBSERVED_VERIFIED"
+    assert topics[0]["shadow_evidence"] == {
+        "topic_config_valid": True,
+        "exact_upstream_state": True,
+        "exact_live_tmux_pane": True,
+        "account_or_applied_revision_proven": False,
+    }
+    assert topics[1]["shadow_confidence"] == "OBSERVED_PARTIAL"
+
+
+def test_shadow_confidence_is_unknown_for_ambiguous_live_identity(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first, _second = _write_sources(config)
+    pane = {
+        "session_name": "cc-n1001-42",
+        "window_id": "@1",
+        "pane_id": "%1",
+        "pane_pid": 123,
+        "cwd": str(first),
+        "dead": False,
+    }
+    inventory = build_inventory(
+        config,
+        live_tmux={
+            "available": True,
+            "reason": None,
+            "panes": [pane, {**pane, "pane_id": "%2", "pane_pid": 124}],
+        },
+    )
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    assert topics[0]["shadow_confidence"] == "UNKNOWN"
+    assert "DUPLICATE_LIVE_TMUX_PANE" in topics[0]["issues"]

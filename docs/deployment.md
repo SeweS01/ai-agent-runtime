@@ -112,6 +112,20 @@ only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends o
 authoritative Runtime snapshot, keeping non-Codex entries explicitly `UNMANAGED`
 instead of rewriting their Telegram Agent engine.
 
+The same inventory command is the M1 shadow-mode observer when it runs before the
+`TELEGRAM_CODEX_BIN` switch. Every topic receives one conservative confidence:
+
+- `OBSERVED_VERIFIED` requires one exact upstream state entry and one live,
+  non-dead tmux pane with the expected session name and canonical cwd;
+- `OBSERVED_PARTIAL` means topic configuration is valid but complete live identity
+  is not present (including a stopped topic);
+- `UNKNOWN` means identity, cwd, state, or pane evidence is malformed, conflicting,
+  or ambiguous.
+
+Even `OBSERVED_VERIFIED` explicitly does not prove account, `CODEX_HOME`, model,
+reasoning, or applied revision. Those facts require Runtime process evidence after
+cutover; shadow observation never promotes cwd or process name into AppliedSpec.
+
 Session-storage candidates follow a separate manifest-and-stage workflow documented
 in `qualification.md`. Staging is copy-only and does not activate a topology; no
 deployment script may replace a non-empty profile directory with a symlink or delete

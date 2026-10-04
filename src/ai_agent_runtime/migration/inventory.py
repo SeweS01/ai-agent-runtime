@@ -362,6 +362,35 @@ def build_inventory(
             record_cwd = record.get("canonical_cwd")
             if canonical is not None and isinstance(record_cwd, str) and record_cwd != canonical:
                 issues.append("BINDING_CWD_MISMATCH")
+        live_panes = panes_by_session.get(expected_session, [])
+        if len(live_panes) > 1:
+            issues.append("DUPLICATE_LIVE_TMUX_PANE")
+        live_pane_exact = False
+        if len(live_panes) == 1:
+            pane = live_panes[0]
+            pane_cwd = pane.get("cwd")
+            pane_dead = pane.get("dead")
+            if pane_dead is not False:
+                issues.append("LIVE_TMUX_PANE_DEAD_OR_UNKNOWN")
+            elif not isinstance(pane_cwd, str) or canonical is None:
+                issues.append("LIVE_TMUX_CWD_UNKNOWN")
+            elif str(Path(pane_cwd).expanduser().resolve(strict=False)) != canonical:
+                issues.append("LIVE_TMUX_CWD_MISMATCH")
+            else:
+                live_pane_exact = True
+        stable_issues = sorted(set(issues))
+        exact_state = (
+            len(state_payloads) == 1
+            and state_payloads[0]["issues"] == []
+            and canonical is not None
+            and cwd_exists
+        )
+        if stable_issues or canonical is None or not cwd_exists:
+            shadow_confidence = "UNKNOWN"
+        elif exact_state and live_pane_exact:
+            shadow_confidence = "OBSERVED_VERIFIED"
+        else:
+            shadow_confidence = "OBSERVED_PARTIAL"
         topics.append(
             {
                 "source_ref": (f"{config.agent_instance_id}/{config.forum_chat_id}/{thread_id}"),
@@ -379,10 +408,17 @@ def build_inventory(
                 "model_override": raw_entry.get("model"),
                 "expected_tmux_session": expected_session,
                 "tmux_state": state_payloads,
-                "live_tmux_panes": panes_by_session.get(expected_session, []),
+                "live_tmux_panes": live_panes,
                 "cus_bindings": cus_records,
                 "runtime_bindings": runtime_records,
-                "issues": sorted(set(issues)),
+                "shadow_confidence": shadow_confidence,
+                "shadow_evidence": {
+                    "topic_config_valid": canonical is not None and cwd_exists,
+                    "exact_upstream_state": exact_state,
+                    "exact_live_tmux_pane": live_pane_exact,
+                    "account_or_applied_revision_proven": False,
+                },
+                "issues": stable_issues,
             }
         )
     topics.sort(key=lambda item: cast(int, item["thread_id"]))
@@ -410,6 +446,10 @@ def build_inventory(
         if state.thread_id is None or (state.chat_id, state.thread_id) not in known_topics
     ]
     timestamp = generated_at or datetime.now(tz=UTC)
+    shadow_counts = {
+        confidence: sum(topic["shadow_confidence"] == confidence for topic in topics)
+        for confidence in ("OBSERVED_VERIFIED", "OBSERVED_PARTIAL", "UNKNOWN")
+    }
     body: dict[str, object] = {
         "schema": INVENTORY_SCHEMA,
         "generated_at": timestamp.isoformat().replace("+00:00", "Z"),
@@ -430,6 +470,7 @@ def build_inventory(
         "invalid_topic_keys": sorted(invalid_topic_keys),
         "orphan_tmux_states": orphan_states,
         "live_tmux": observed_tmux,
+        "shadow_confidence_counts": shadow_counts,
     }
     body["inventory_digest"] = _digest(body)
     return body
