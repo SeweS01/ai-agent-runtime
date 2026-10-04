@@ -82,6 +82,27 @@ This verifies exact SHA, tmux naming, spawn-before-state-save ordering, and the
 sanitized `env -i` contract. It is only one input to qualification and does not
 replace real Telegram/Codex E2E or retirement race tests.
 
+The deterministic retirement harness must be executed with the pinned upstream
+Python environment. It imports the exact upstream `TmuxManager` and Telegram send
+path, injects external tmux disappearance in all six required windows, and records
+per-prompt submission and explicit-alert evidence:
+
+```bash
+/path/to/telegram-ai-agent/.venv/bin/python \
+  tools/qualify_retirement_race.py \
+  --upstream /path/to/telegram-ai-agent \
+  --release-tuple /srv/qualification/release-tuple.json \
+  --report-id staging-2026-10-04-001 \
+  --environment staging \
+  --output /srv/qualification/evidence/retirement-race.json
+```
+
+The harness uses deterministic tmux I/O test doubles but real pinned upstream
+control-flow. An upstream alert callback is evidence of an explicit-not-delivered
+outcome; actual Telegram delivery remains covered by the separate `telegram_e2e`
+gate. A locally produced artifact remains `environment=local` and cannot satisfy the
+release verifier.
+
 ## Session-storage topology manifest
 
 Before testing a shared-session candidate, create a non-destructive manifest for
