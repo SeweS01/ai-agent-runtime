@@ -11,6 +11,7 @@ import pytest
 
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.migration import inventory as inventory_module
+from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
 from ai_agent_runtime.migration.inventory import (
     InventoryError,
     build_inventory,
@@ -312,3 +313,110 @@ def test_shadow_confidence_is_unknown_for_ambiguous_live_identity(tmp_path: Path
     assert isinstance(topics, list)
     assert topics[0]["shadow_confidence"] == "UNKNOWN"
     assert "DUPLICATE_LIVE_TMUX_PANE" in topics[0]["issues"]
+
+
+def _write_legacy_settings(path: Path, *, project_id: str, project_path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "store_revision": 9,
+                "projects": {
+                    project_id: {
+                        "project_id": project_id,
+                        "project_path": str(project_path),
+                        "provider_id": "codex",
+                        "account_profile": "legacy-work",
+                        "model": "gpt-test",
+                        "reasoning_effort": "high",
+                        "revision": 3,
+                        "auth_json": "must-not-leak",
+                    }
+                },
+                "telegram_bot_token": "must-not-leak",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_legacy_project_settings_seed_unique_topic_binding_plan(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first, _second = _write_sources(config)
+    topic_config = json.loads(config.topic_config_path.read_text(encoding="utf-8"))
+    topic_config["topics"].pop("43")
+    config.topic_config_path.write_text(json.dumps(topic_config), encoding="utf-8")
+    legacy = tmp_path / "project_settings_v2.json"
+    _write_legacy_settings(legacy, project_id="project-shared", project_path=first)
+
+    inventory = build_inventory(
+        config,
+        legacy_project_settings=legacy,
+        live_tmux={"available": False, "reason": "test", "panes": []},
+    )
+    plan = build_binding_migration_plan(inventory, generation_id="migration-test")
+
+    assert plan["accepted"] is True
+    assert plan["counts"] == {"READY": 1, "UNMANAGED": 0, "BLOCKED": 0}
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    assert topics[0]["cus_bindings"] == [
+        {
+            "project_id": "project-shared",
+            "canonical_cwd": str(first),
+            "lifecycle_status": "CONFIGURED",
+            "desired": {
+                "provider": "codex",
+                "account_profile": "legacy-work",
+                "model": "gpt-test",
+                "reasoning_effort": "high",
+            },
+            "migration_source": "legacy_project_settings_v2",
+        }
+    ]
+    encoded = json.dumps(inventory)
+    assert "must-not-leak" not in encoded
+    assert "telegram_bot_token" not in encoded
+
+
+def test_legacy_project_settings_block_shared_cwd_mapping(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first, _second = _write_sources(config)
+    legacy = tmp_path / "project_settings_v2.json"
+    _write_legacy_settings(legacy, project_id="project-shared", project_path=first)
+
+    inventory = build_inventory(
+        config,
+        legacy_project_settings=legacy,
+        live_tmux={"available": False, "reason": "test", "panes": []},
+    )
+    plan = build_binding_migration_plan(inventory, generation_id="migration-test")
+
+    assert plan["accepted"] is False
+    assert plan["counts"] == {"READY": 0, "UNMANAGED": 0, "BLOCKED": 2}
+    entries = plan["entries"]
+    assert isinstance(entries, list)
+    assert all("LEGACY_PROJECT_SCOPE_AMBIGUOUS" in entry["blockers"] for entry in entries)
+
+
+def test_inventory_rejects_multiple_cus_sources(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    with pytest.raises(InventoryError, match="mutually exclusive"):
+        build_inventory(
+            config,
+            cus_control_store=tmp_path / "new.json",
+            legacy_project_settings=tmp_path / "legacy.json",
+        )
+
+
+def test_inventory_rejects_malformed_legacy_project_settings(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _write_sources(config)
+    legacy = tmp_path / "project_settings_v2.json"
+    legacy.write_text(json.dumps({"version": 1, "projects": {}}), encoding="utf-8")
+    with pytest.raises(InventoryError, match="version 2"):
+        build_inventory(
+            config,
+            legacy_project_settings=legacy,
+            live_tmux={"available": False, "reason": "test", "panes": []},
+        )

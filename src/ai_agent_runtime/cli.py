@@ -84,6 +84,7 @@ def _inventory_export(
     *,
     output: str,
     cus_control_store: str | None,
+    legacy_project_settings: str | None,
     skip_live_tmux: bool,
 ) -> int:
     live_tmux = (
@@ -92,6 +93,9 @@ def _inventory_export(
     inventory = build_inventory(
         config,
         cus_control_store=Path(cus_control_store).expanduser() if cus_control_store else None,
+        legacy_project_settings=(
+            Path(legacy_project_settings).expanduser() if legacy_project_settings else None
+        ),
         live_tmux=live_tmux,
     )
     target = Path(output).expanduser()
@@ -434,6 +438,7 @@ def main() -> None:
     inventory_export = inventory_commands.add_parser("export")
     inventory_export.add_argument("--output", required=True)
     inventory_export.add_argument("--cus-control-store")
+    inventory_export.add_argument("--legacy-project-settings")
     inventory_export.add_argument("--skip-live-tmux", action="store_true")
     inventory_compare = inventory_commands.add_parser("compare")
     inventory_compare.add_argument("--baseline", required=True)
@@ -665,6 +670,7 @@ def main() -> None:
                     config,
                     output=namespace.output,
                     cus_control_store=namespace.cus_control_store,
+                    legacy_project_settings=namespace.legacy_project_settings,
                     skip_live_tmux=namespace.skip_live_tmux,
                 )
             )

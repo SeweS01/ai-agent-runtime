@@ -150,6 +150,23 @@ ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory export \
   --output /var/lib/ai-agent-runtime/migration/pre-cutover.json
 ```
 
+For the first migration from the legacy project-scoped CUS store, use its
+settings file instead of `--cus-control-store`:
+
+```bash
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory export \
+  --legacy-project-settings \
+    /home/devops/.ai_session_control_center/project_settings_v2.json \
+  --output /var/lib/ai-agent-runtime/migration/pre-cutover-from-legacy.json
+```
+
+The two source options are mutually exclusive. The legacy reader copies only
+the project id/path and account-profile slug, provider, model and reasoning;
+tokens, credentials and unrelated legacy fields are omitted. Because the old
+store is project-scoped rather than topic-scoped, any legacy record whose cwd
+is shared by multiple topics is marked `LEGACY_PROJECT_SCOPE_AMBIGUOUS` and
+cannot be imported until the operator assigns a profile to each topic.
+
 The destination is created atomically with mode `0600` and is never
 overwritten. Store it in the change record and apply the operator's detached
 signature outside the repository. After cutover, export a new artifact and

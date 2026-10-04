@@ -194,6 +194,84 @@ def _load_cus_bindings(
     }
 
 
+def _load_legacy_project_settings(
+    path: Path | None,
+) -> tuple[dict[str, list[dict[str, object]]], dict[str, object]]:
+    """Load the old project-scoped CUS settings without copying credentials.
+
+    The legacy store has no Telegram topic identity, so records are indexed by
+    canonical cwd. ``build_inventory`` only projects a record onto a topic when
+    that cwd belongs to exactly one topic. Shared cwd is deliberately reported
+    as ambiguous because Runtime Binding settings are topic-scoped in V1.
+    """
+
+    if path is None:
+        return {}, {"configured": False, "present": False}
+    raw, sha256 = _read_json_object(path)
+    if raw.get("version") != 2:
+        raise InventoryError("legacy project settings must use version 2")
+    projects = raw.get("projects")
+    if not isinstance(projects, dict):
+        raise InventoryError("legacy project settings do not contain object-valued projects")
+
+    indexed: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for map_key, value in projects.items():
+        if not isinstance(map_key, str) or not map_key or not isinstance(value, dict):
+            raise InventoryError("legacy project settings contain a malformed project record")
+        project_id = value.get("project_id")
+        project_path = value.get("project_path")
+        if not isinstance(project_id, str) or not project_id:
+            raise InventoryError("legacy project settings contain an invalid project_id")
+        if project_id != map_key:
+            raise InventoryError("legacy project settings project_id does not match its map key")
+        if not isinstance(project_path, str) or not project_path:
+            raise InventoryError("legacy project settings contain an invalid project_path")
+        expanded = Path(project_path).expanduser()
+        if not expanded.is_absolute():
+            raise InventoryError("legacy project settings project_path must be absolute")
+        canonical_cwd = str(expanded.resolve(strict=False))
+
+        provider = value.get("provider_id")
+        account_profile = value.get("account_profile")
+        model = value.get("model")
+        reasoning_effort = value.get("reasoning_effort")
+        for field_name, field_value in (
+            ("provider_id", provider),
+            ("account_profile", account_profile),
+            ("model", model),
+            ("reasoning_effort", reasoning_effort),
+        ):
+            if field_value is not None and not isinstance(field_value, str):
+                raise InventoryError(
+                    f"legacy project settings contain a non-string {field_name}"
+                )
+
+        indexed[canonical_cwd].append(
+            {
+                "project_id": project_id,
+                "canonical_cwd": canonical_cwd,
+                "lifecycle_status": "CONFIGURED",
+                "desired": {
+                    "provider": provider,
+                    "account_profile": account_profile,
+                    "model": model,
+                    "reasoning_effort": reasoning_effort,
+                },
+                "migration_source": "legacy_project_settings_v2",
+            }
+        )
+
+    return indexed, {
+        "configured": True,
+        "path": str(path),
+        "present": True,
+        "sha256": sha256,
+        "store_revision": raw.get("store_revision"),
+        "safe_project_count": sum(len(records) for records in indexed.values()),
+        "safe_records_digest": _digest(indexed),
+    }
+
+
 def _load_runtime_bindings(
     path: Path,
     *,
@@ -266,10 +344,16 @@ def build_inventory(
     config: RuntimeConfig,
     *,
     cus_control_store: Path | None = None,
+    legacy_project_settings: Path | None = None,
     live_tmux: dict[str, object] | None = None,
     generated_at: datetime | None = None,
 ) -> dict[str, object]:
     """Build a secret-free, read-only inventory artifact for one AgentInstance."""
+
+    if cus_control_store is not None and legacy_project_settings is not None:
+        raise InventoryError(
+            "cus_control_store and legacy_project_settings are mutually exclusive"
+        )
 
     topic_evidence = _source_evidence(config.topic_config_path)
     topic_snapshot = read_topic_config(config.topic_config_path)
@@ -289,6 +373,9 @@ def build_inventory(
         cus_control_store,
         agent_instance_id=config.agent_instance_id,
     )
+    legacy_by_cwd, legacy_evidence = _load_legacy_project_settings(
+        legacy_project_settings,
+    )
     runtime_by_topic, runtime_evidence = _load_runtime_bindings(
         config.database_path,
         agent_instance_id=config.agent_instance_id,
@@ -303,6 +390,13 @@ def build_inventory(
 
     topics_raw = topic_snapshot.raw["topics"]
     assert isinstance(topics_raw, dict)
+    configured_cwd_counts: dict[str, int] = defaultdict(int)
+    for candidate in topics_raw.values():
+        if not isinstance(candidate, dict):
+            continue
+        _raw, candidate_canonical, _exists, _issues = _safe_cwd(candidate.get("cwd"))
+        if candidate_canonical is not None:
+            configured_cwd_counts[candidate_canonical] += 1
     adapter = TelegramUpstreamAdapter(
         config.upstream_sha,
         session_name_prefix=config.tmux_session_prefix,
@@ -352,7 +446,12 @@ def build_inventory(
                     "issues": sorted(set(state_issues)),
                 }
             )
-        cus_records = cus_by_topic.get((config.forum_chat_id, thread_id), [])
+        if legacy_project_settings is not None and canonical is not None:
+            cus_records = legacy_by_cwd.get(canonical, [])
+            if configured_cwd_counts[canonical] > 1 and cus_records:
+                issues.append("LEGACY_PROJECT_SCOPE_AMBIGUOUS")
+        else:
+            cus_records = cus_by_topic.get((config.forum_chat_id, thread_id), [])
         runtime_records = runtime_by_topic.get((config.forum_chat_id, thread_id), [])
         if len(cus_records) > 1:
             issues.append("DUPLICATE_CUS_BINDING")
@@ -464,6 +563,7 @@ def build_inventory(
             "tmux_state": tmux_evidence,
             "runtime_database": runtime_evidence,
             "cus_control_store": cus_evidence,
+            "legacy_project_settings": legacy_evidence,
         },
         "topics": topics,
         "shared_canonical_cwds": shared_cwds,
