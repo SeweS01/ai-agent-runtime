@@ -42,8 +42,31 @@ def test_install_release_is_side_by_side_verified_and_not_activated(tmp_path: Pa
             (target / "bin" / "python").symlink_to(venv_base_python)
             return
         environment = Path(normalized[0]).parent
-        _executable(environment / "ai-agent-runtime")
-        _executable(environment / "codex-wrapper")
+        for name in (
+            "ai-agent-runtime",
+            "codex-wrapper",
+            "ai-agent-runtime-qualify-upstream",
+            "ai-agent-runtime-qualify-retirement",
+        ):
+            _executable(environment / name)
+        record = (
+            environment.parent
+            / "lib/python3.12/site-packages/ai_agent_runtime-0.1.0.dist-info/RECORD"
+        )
+        record.parent.mkdir(parents=True)
+        record.write_text(
+            "".join(
+                f"../../../bin/{name},,\n"
+                for name in (
+                    "ai-agent-runtime",
+                    "codex-wrapper",
+                    "ai-agent-runtime-qualify-upstream",
+                    "ai-agent-runtime-qualify-retirement",
+                )
+            )
+            + "ai_agent_runtime-0.1.0.dist-info/RECORD,,\n",
+            encoding="utf-8",
+        )
 
     report = install_runtime_release(
         wheel=wheel,
@@ -63,6 +86,7 @@ def test_install_release_is_side_by_side_verified_and_not_activated(tmp_path: Pa
     assert report["activation_performed"] is False
     assert report["services_restarted"] is False
     assert report["production_cutover_authorized"] is False
+    assert report["installed_files_digest"] == _digest(report["installed_files"])
     assert report["report_digest"] == _digest(
         {key: value for key, value in report.items() if key != "report_digest"}
     )
@@ -83,6 +107,17 @@ def test_install_release_is_side_by_side_verified_and_not_activated(tmp_path: Pa
     blocked = verify_runtime_install_report(report_path)
     assert blocked["accepted"] is False
     assert "install_report_wheel_mismatch" in blocked["errors"]
+
+    wheel.write_bytes(b"wheel-content")
+    installed_runtime = release / "bin/ai-agent-runtime"
+    installed_runtime.write_bytes(b"#!/bin/sh\nexit 23\n")
+    installed_runtime.chmod(0o700)
+    blocked_install = verify_runtime_install_report(report_path)
+    assert blocked_install["accepted"] is False
+    assert (
+        "install_report_installed_file_mismatch:bin/ai-agent-runtime"
+        in blocked_install["errors"]
+    )
 
 
 def test_install_release_rejects_digest_overwrite_and_cleans_failed_stage(

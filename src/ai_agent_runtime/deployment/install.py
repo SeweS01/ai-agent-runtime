@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -16,11 +17,18 @@ from ai_agent_runtime.errors import RuntimeFailureError
 from ai_agent_runtime.migration.inventory import InventoryError, _digest
 from ai_agent_runtime.process_safety import file_sha256, validate_owned_executable
 
-INSTALL_REPORT_SCHEMA: Final = "ai-agent-runtime.install-report.v1"
+INSTALL_REPORT_SCHEMA: Final = "ai-agent-runtime.install-report.v2"
 INSTALL_VERIFICATION_SCHEMA: Final = "ai-agent-runtime.install-verification.v1"
 _MAX_REPORT_BYTES: Final = 1024 * 1024
 _RELEASE_ID_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 CommandRunner = Callable[[Sequence[str]], None]
+
+_REQUIRED_ENTRYPOINTS: Final = (
+    "ai-agent-runtime",
+    "codex-wrapper",
+    "ai-agent-runtime-qualify-upstream",
+    "ai-agent-runtime-qualify-retirement",
+)
 
 
 def _run(command: Sequence[str]) -> None:
@@ -59,6 +67,92 @@ def _safe_wheel(path: Path, expected_sha256: str) -> tuple[Path, str]:
     if actual != expected_sha256:
         raise InventoryError("Runtime wheel digest mismatch")
     return resolved, actual
+
+
+def _installed_distribution_manifest(release: Path) -> list[dict[str, str]]:
+    """Hash every installed file named by the wheel's immutable RECORD."""
+
+    records = sorted(
+        release.glob("lib/python*/site-packages/ai_agent_runtime-*.dist-info/RECORD")
+    )
+    if len(records) != 1:
+        raise InventoryError("installed Runtime distribution RECORD is missing or ambiguous")
+    record = records[0]
+    site_packages = record.parent.parent
+    manifest: list[dict[str, str]] = []
+    seen: set[str] = set()
+    with record.open(newline="", encoding="utf-8") as stream:
+        for row in csv.reader(stream):
+            if not row or not row[0]:
+                raise InventoryError("installed Runtime distribution RECORD contains an empty path")
+            unresolved = site_packages / row[0]
+            if unresolved.is_symlink():
+                raise InventoryError("installed Runtime distribution contains a symlink")
+            try:
+                installed = unresolved.resolve(strict=True)
+                relative = installed.relative_to(release)
+            except (OSError, ValueError) as exc:
+                raise InventoryError(
+                    "installed Runtime distribution path escapes or is missing"
+                ) from exc
+            relative_text = relative.as_posix()
+            if relative_text in seen or not installed.is_file():
+                raise InventoryError("installed Runtime distribution path is invalid or duplicated")
+            seen.add(relative_text)
+            manifest.append({"path": relative_text, "sha256": file_sha256(installed)})
+    required = {f"bin/{name}" for name in _REQUIRED_ENTRYPOINTS}
+    if not required.issubset(seen):
+        raise InventoryError("installed Runtime distribution is missing required entrypoints")
+    return sorted(manifest, key=lambda item: item["path"])
+
+
+def _verify_installed_distribution_manifest(
+    release: Path, raw_manifest: object, expected_digest: object
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(raw_manifest, list) or not raw_manifest:
+        return ["install_report_installed_files_invalid"]
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_entry in raw_manifest:
+        if not isinstance(raw_entry, dict) or set(raw_entry) != {"path", "sha256"}:
+            errors.append("install_report_installed_file_entry_invalid")
+            continue
+        relative_text = raw_entry.get("path")
+        expected_sha256 = raw_entry.get("sha256")
+        if not isinstance(relative_text, str) or not relative_text:
+            errors.append("install_report_installed_file_path_invalid")
+            continue
+        relative = Path(relative_text)
+        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != relative_text:
+            errors.append("install_report_installed_file_path_invalid")
+            continue
+        if relative_text in seen:
+            errors.append("install_report_installed_file_duplicate")
+            continue
+        seen.add(relative_text)
+        if not isinstance(expected_sha256, str):
+            errors.append("install_report_installed_file_digest_invalid")
+            continue
+        normalized.append({"path": relative_text, "sha256": expected_sha256})
+        installed = release / relative
+        try:
+            if (
+                installed.is_symlink()
+                or not installed.is_file()
+                or file_sha256(installed) != expected_sha256
+            ):
+                errors.append(f"install_report_installed_file_mismatch:{relative_text}")
+        except (OSError, RuntimeFailureError):
+            errors.append(f"install_report_installed_file_mismatch:{relative_text}")
+    if normalized != sorted(normalized, key=lambda item: item["path"]):
+        errors.append("install_report_installed_files_not_sorted")
+    if expected_digest != _digest(normalized):
+        errors.append("install_report_installed_files_digest_mismatch")
+    required = {f"bin/{name}" for name in _REQUIRED_ENTRYPOINTS}
+    if not required.issubset(seen):
+        errors.append("install_report_required_entrypoints_missing")
+    return errors
 
 
 def install_runtime_release(
@@ -112,6 +206,11 @@ def install_runtime_release(
         )
         runtime_executable = validate_owned_executable(destination / "bin" / "ai-agent-runtime")
         wrapper_executable = validate_owned_executable(destination / "bin" / "codex-wrapper")
+        qualification_executables = {
+            name: str(validate_owned_executable(destination / "bin" / name))
+            for name in _REQUIRED_ENTRYPOINTS[2:]
+        }
+        installed_files = _installed_distribution_manifest(destination)
         installing_marker.unlink()
         release_fd = os.open(destination, os.O_RDONLY)
         try:
@@ -137,6 +236,9 @@ def install_runtime_release(
         "python_path": str(python_path),
         "runtime_executable": str(destination / "bin" / runtime_executable.name),
         "wrapper_executable": str(destination / "bin" / wrapper_executable.name),
+        "qualification_executables": qualification_executables,
+        "installed_files": installed_files,
+        "installed_files_digest": _digest(installed_files),
         "existing_releases_preserved": True,
         "activation_performed": False,
         "services_restarted": False,
@@ -170,6 +272,9 @@ def verify_runtime_install_report(path: Path) -> dict[str, object]:
         "python_path",
         "runtime_executable",
         "wrapper_executable",
+        "qualification_executables",
+        "installed_files",
+        "installed_files_digest",
         "existing_releases_preserved",
         "activation_performed",
         "services_restarted",
@@ -214,9 +319,25 @@ def verify_runtime_install_report(path: Path) -> dict[str, object]:
             errors.append("install_report_release_invalid")
         runtime = validate_owned_executable(Path(str(raw["runtime_executable"])))
         wrapper = validate_owned_executable(Path(str(raw["wrapper_executable"])))
-        if runtime.parent.parent != release or wrapper.parent.parent != release:
+        qualification_raw = raw["qualification_executables"]
+        if not isinstance(qualification_raw, dict) or set(qualification_raw) != set(
+            _REQUIRED_ENTRYPOINTS[2:]
+        ):
+            raise ValueError("qualification executable map is invalid")
+        qualification = [
+            validate_owned_executable(Path(str(qualification_raw[name])))
+            for name in _REQUIRED_ENTRYPOINTS[2:]
+        ]
+        if any(path.parent.parent != release for path in (runtime, wrapper, *qualification)):
             errors.append("install_report_executable_path_mismatch")
-    except (KeyError, OSError, RuntimeFailureError):
+        errors.extend(
+            _verify_installed_distribution_manifest(
+                release,
+                raw["installed_files"],
+                raw["installed_files_digest"],
+            )
+        )
+    except (KeyError, OSError, RuntimeFailureError, ValueError):
         errors.append("install_report_executable_invalid")
     verification: dict[str, object] = {
         "schema": INSTALL_VERIFICATION_SCHEMA,
@@ -227,6 +348,8 @@ def verify_runtime_install_report(path: Path) -> dict[str, object]:
         "release_path": raw.get("release_path"),
         "runtime_executable": raw.get("runtime_executable"),
         "wrapper_executable": raw.get("wrapper_executable"),
+        "qualification_executables": raw.get("qualification_executables"),
+        "installed_files_digest": raw.get("installed_files_digest"),
         "wheel_sha256": raw.get("wheel_sha256"),
         "errors": errors,
         "mutations_performed": False,

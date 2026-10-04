@@ -63,6 +63,12 @@ relocatable. A private `.installing` marker exists only while that new directory
 being populated; failure removes that new directory, while success fsyncs it and
 removes the marker. Merely installing a directory never activates it.
 
+Install report schema v2 also records a sorted SHA-256 manifest for every Runtime
+distribution file named by the wheel's installed `RECORD`, including the daemon,
+wrapper and both qualification entrypoints. `verify-install`, instance-link
+preparation and deployment audit re-hash that manifest; retaining the original wheel
+while modifying installed Python code or a harness therefore blocks activation.
+
 `prepare-instance-links` is intentionally limited to an absent instance. It creates
 one instance link to the verified release and two stable, instance-named entrypoints
 through that link; it refuses to replace or upgrade any existing path. Its result is

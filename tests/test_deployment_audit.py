@@ -30,7 +30,23 @@ def _install_report(tmp_path: Path) -> tuple[Path, Path, Path]:
     if not report_path.exists():
         _executable(runtime, b"#!/bin/sh\nexit 0\n")
         _executable(wrapper, b"#!/bin/sh\nexit 0\n")
+        qualification = {
+            name: release / "bin" / name
+            for name in (
+                "ai-agent-runtime-qualify-upstream",
+                "ai-agent-runtime-qualify-retirement",
+            )
+        }
+        for executable in qualification.values():
+            _executable(executable, b"#!/bin/sh\nexit 0\n")
         wheel.write_bytes(b"runtime-wheel")
+        installed_files = [
+            {
+                "path": str(path.relative_to(release)),
+                "sha256": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+            }
+            for path in sorted((runtime, wrapper, *qualification.values()))
+        ]
         report: dict[str, object] = {
             "schema": INSTALL_REPORT_SCHEMA,
             "status": "INSTALLED_NOT_ACTIVATED",
@@ -41,6 +57,11 @@ def _install_report(tmp_path: Path) -> tuple[Path, Path, Path]:
             "python_path": "/usr/bin/python3.12",
             "runtime_executable": str(runtime),
             "wrapper_executable": str(wrapper),
+            "qualification_executables": {
+                name: str(path) for name, path in qualification.items()
+            },
+            "installed_files": installed_files,
+            "installed_files_digest": _digest(installed_files),
             "existing_releases_preserved": True,
             "activation_performed": False,
             "services_restarted": False,
