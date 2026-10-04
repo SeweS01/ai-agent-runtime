@@ -19,6 +19,14 @@ from pathlib import Path
 from typing import Any, cast
 
 from ai_agent_runtime.config import RuntimeConfig
+from ai_agent_runtime.errors import RuntimeFailureError
+from ai_agent_runtime.process_safety import (
+    proc_environment,
+    proc_starttime,
+    proc_uid,
+    process_executable_evidence,
+    validate_profile_path,
+)
 from ai_agent_runtime.telegram_upstream.adapter import TelegramUpstreamAdapter
 from ai_agent_runtime.telegram_upstream.tmux_state import UpstreamTmuxState, read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
@@ -27,8 +35,7 @@ INVENTORY_SCHEMA = "ai-agent-runtime.migration-inventory.v1"
 COMPARISON_SCHEMA = "ai-agent-runtime.migration-comparison.v1"
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _TMUX_FORMAT = (
-    "#{session_name}\t#{window_id}\t#{pane_id}\t"
-    "#{pane_pid}\t#{pane_current_path}\t#{pane_dead}"
+    "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{pane_dead}"
 )
 
 
@@ -146,6 +153,63 @@ def collect_live_tmux() -> dict[str, object]:
     return {"available": True, "reason": None, "panes": panes}
 
 
+def _observe_live_codex_account(
+    config: RuntimeConfig,
+    pane: dict[str, object],
+    *,
+    expected_cwd: str,
+) -> dict[str, object]:
+    """Prove a live legacy pane's account without exporting arbitrary environment."""
+
+    def unverified(reason: str) -> dict[str, object]:
+        return {
+            "verified": False,
+            "code": "LIVE_CODEX_ACCOUNT_UNVERIFIED",
+            "reason": reason,
+        }
+
+    raw_pid = pane.get("pane_pid")
+    if not isinstance(raw_pid, int) or isinstance(raw_pid, bool) or raw_pid <= 0:
+        return unverified("PANE_PID_INVALID")
+    try:
+        starttime = proc_starttime(raw_pid)
+        uid = proc_uid(raw_pid)
+        if uid != os.getuid():
+            return unverified("PROCESS_UID_MISMATCH")
+        process_cwd = Path(f"/proc/{raw_pid}/cwd").resolve(strict=True)
+        if str(process_cwd) != expected_cwd:
+            return unverified("PROCESS_CWD_MISMATCH")
+        executable = process_executable_evidence(raw_pid)
+        if executable.get("sha256") != config.real_codex_sha256:
+            return unverified("BINARY_DIGEST_MISMATCH")
+        environment = proc_environment(raw_pid)
+        raw_codex_home = environment.get("CODEX_HOME")
+        if not raw_codex_home:
+            return unverified("CODEX_HOME_MISSING")
+        profile = validate_profile_path(
+            Path(raw_codex_home),
+            root=config.profiles_root,
+            uid=uid,
+        )
+        profiles_root = config.profiles_root.resolve(strict=True)
+        if profile.parent != profiles_root or not profile.name:
+            return unverified("PROFILE_NOT_DIRECT_CHILD")
+        if proc_starttime(raw_pid) != starttime:
+            return unverified("PROCESS_IDENTITY_CHANGED")
+        return {
+            "verified": True,
+            "pid": raw_pid,
+            "starttime": starttime,
+            "uid": uid,
+            "codex_home": str(profile),
+            "account_profile": profile.name,
+            "binary_sha256": executable["sha256"],
+            "executable": executable,
+        }
+    except (OSError, RuntimeFailureError, UnicodeError, ValueError):
+        return unverified("PROCESS_EVIDENCE_UNAVAILABLE")
+
+
 def _load_cus_bindings(
     path: Path | None,
     *,
@@ -242,9 +306,7 @@ def _load_legacy_project_settings(
             ("reasoning_effort", reasoning_effort),
         ):
             if field_value is not None and not isinstance(field_value, str):
-                raise InventoryError(
-                    f"legacy project settings contain a non-string {field_name}"
-                )
+                raise InventoryError(f"legacy project settings contain a non-string {field_name}")
 
         indexed[canonical_cwd].append(
             {
@@ -351,9 +413,7 @@ def build_inventory(
     """Build a secret-free, read-only inventory artifact for one AgentInstance."""
 
     if cus_control_store is not None and legacy_project_settings is not None:
-        raise InventoryError(
-            "cus_control_store and legacy_project_settings are mutually exclusive"
-        )
+        raise InventoryError("cus_control_store and legacy_project_settings are mutually exclusive")
 
     topic_evidence = _source_evidence(config.topic_config_path)
     topic_snapshot = read_topic_config(config.topic_config_path)
@@ -465,6 +525,11 @@ def build_inventory(
         if len(live_panes) > 1:
             issues.append("DUPLICATE_LIVE_TMUX_PANE")
         live_pane_exact = False
+        live_codex_process: dict[str, object] = {
+            "verified": False,
+            "code": "LIVE_CODEX_ACCOUNT_UNVERIFIED",
+            "reason": "EXACT_LIVE_PANE_UNAVAILABLE",
+        }
         if len(live_panes) == 1:
             pane = live_panes[0]
             pane_cwd = pane.get("cwd")
@@ -477,6 +542,11 @@ def build_inventory(
                 issues.append("LIVE_TMUX_CWD_MISMATCH")
             else:
                 live_pane_exact = True
+                live_codex_process = _observe_live_codex_account(
+                    config,
+                    pane,
+                    expected_cwd=canonical,
+                )
         stable_issues = sorted(set(issues))
         exact_state = (
             len(state_payloads) == 1
@@ -508,6 +578,7 @@ def build_inventory(
                 "expected_tmux_session": expected_session,
                 "tmux_state": state_payloads,
                 "live_tmux_panes": live_panes,
+                "live_codex_process": live_codex_process,
                 "cus_bindings": cus_records,
                 "runtime_bindings": runtime_records,
                 "shadow_confidence": shadow_confidence,

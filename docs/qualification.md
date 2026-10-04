@@ -189,7 +189,9 @@ Once that topology is selected for a migration rehearsal, regenerate the M0
 inventory and the digest-bound session-provenance plan described in `deployment.md`.
 The `legacy_session_provenance_import` and same-binding `/resume` assertions must
 prove both an imported pre-cutover current session and a session created natively
-after Runtime launch. Any changed rollout
+after Runtime launch. The legacy import must be rejected unless the live pane's
+process identity, qualified binary digest, canonical cwd and safe `CODEX_HOME`
+independently prove the same account selected by the binding plan. Any changed rollout
 path/device/inode after planning must make the import fail closed; an unproven older
 picker entry must also fail closed rather than being assigned by cwd.
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -256,6 +258,111 @@ def test_inventory_uses_agent_instance_tmux_prefix(tmp_path: Path) -> None:
     topics = inventory["topics"]
     assert isinstance(topics, list)
     assert topics[0]["expected_tmux_session"] == "prod-a-n1001-42"
+
+
+def test_inventory_exports_only_sanitized_live_account_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    first, _second = _write_sources(config)
+    observed = {
+        "verified": True,
+        "pid": 123,
+        "starttime": 456,
+        "uid": os.getuid(),
+        "codex_home": str(config.profiles_root / "work"),
+        "account_profile": "work",
+        "binary_sha256": config.real_codex_sha256,
+        "executable": {
+            "path": str(config.real_codex),
+            "device": 1,
+            "inode": 2,
+            "size": 3,
+            "mtime_ns": 4,
+            "sha256": config.real_codex_sha256,
+        },
+    }
+
+    def fake_observe(
+        observed_config: RuntimeConfig,
+        pane: dict[str, object],
+        *,
+        expected_cwd: str,
+    ) -> dict[str, object]:
+        assert observed_config is config
+        assert pane["pane_pid"] == 123
+        assert expected_cwd == str(first)
+        return observed
+
+    monkeypatch.setattr(inventory_module, "_observe_live_codex_account", fake_observe)
+    inventory = build_inventory(
+        config,
+        live_tmux={
+            "available": True,
+            "reason": None,
+            "panes": [
+                {
+                    "session_name": "cc-n1001-42",
+                    "window_id": "@1",
+                    "pane_id": "%1",
+                    "pane_pid": 123,
+                    "cwd": str(first),
+                    "dead": False,
+                }
+            ],
+        },
+    )
+
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    assert topics[0]["live_codex_process"] == observed
+    assert set(topics[0]["live_codex_process"]) == {
+        "verified",
+        "pid",
+        "starttime",
+        "uid",
+        "codex_home",
+        "account_profile",
+        "binary_sha256",
+        "executable",
+    }
+
+
+def test_live_account_observation_proves_process_profile_and_binary(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    project = config.allowed_project_roots[0] / "live"
+    project.mkdir()
+    profile = config.profiles_root / "work"
+    profile.mkdir(parents=True)
+    executable = Path(sys.executable).resolve(strict=True)
+    config = replace(
+        config,
+        real_codex=executable,
+        real_codex_sha256=(f"sha256:{hashlib.sha256(executable.read_bytes()).hexdigest()}"),
+    )
+    environment = dict(os.environ)
+    environment["CODEX_HOME"] = str(profile)
+    process = subprocess.Popen(
+        [str(executable), "-c", "import time; time.sleep(30)"],
+        cwd=project,
+        env=environment,
+    )
+    try:
+        observed = inventory_module._observe_live_codex_account(
+            config,
+            {"pane_pid": process.pid},
+            expected_cwd=str(project),
+        )
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+    assert observed["verified"] is True
+    assert observed["account_profile"] == "work"
+    assert observed["codex_home"] == str(profile)
+    assert observed["binary_sha256"] == config.real_codex_sha256
+    assert "environment" not in observed
 
 
 def test_shadow_confidence_requires_exact_state_and_live_pane(tmp_path: Path) -> None:

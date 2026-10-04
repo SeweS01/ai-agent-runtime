@@ -13,7 +13,7 @@ import pytest
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
 from ai_agent_runtime.domain import DesiredSpec, RuntimeBinding
-from ai_agent_runtime.errors import RuntimeFailureError
+from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
@@ -53,6 +53,24 @@ def _sources(tmp_path: Path) -> tuple[dict[str, object], dict[str, object], Path
         "engine": "codex",
         "exec_mode": "tmux",
         "issues": [],
+        "live_tmux_panes": [{"pane_pid": 1234}],
+        "live_codex_process": {
+            "verified": True,
+            "pid": 1234,
+            "starttime": 5678,
+            "uid": os.getuid(),
+            "codex_home": str(tmp_path / "profiles" / "work"),
+            "account_profile": "work",
+            "binary_sha256": "sha256:" + "1" * 64,
+            "executable": {
+                "path": "/safe/codex-real",
+                "device": 1,
+                "inode": 2,
+                "size": 3,
+                "mtime_ns": 4,
+                "sha256": "sha256:" + "1" * 64,
+            },
+        },
         "cus_bindings": [
             {
                 "binding_id": "binding-42",
@@ -138,6 +156,21 @@ def test_plan_proves_exact_legacy_session_without_reading_transcript_body(
             "account_profile": "work",
             "canonical_cwd": str(project),
             "session_id": "session-42",
+            "live_process": {
+                "pid": 1234,
+                "starttime": 5678,
+                "uid": os.getuid(),
+                "codex_home": str(tmp_path / "profiles" / "work"),
+                "account_profile": "work",
+                "executable": {
+                    "path": "/safe/codex-real",
+                    "device": 1,
+                    "inode": 2,
+                    "size": 3,
+                    "mtime_ns": 4,
+                    "sha256": "sha256:" + "1" * 64,
+                },
+            },
             "rollout_path": str(rollout),
             "rollout_device": rollout.stat().st_dev,
             "rollout_inode": rollout.stat().st_ino,
@@ -171,10 +204,7 @@ def test_rollout_inspection_handles_short_os_reads(
 def test_plan_blocks_rollout_metadata_mismatch_and_digest_tampering(tmp_path: Path) -> None:
     inventory, binding_plan, _project, rollout = _sources(tmp_path)
     rollout.write_text(
-        json.dumps(
-            {"type": "session_meta", "payload": {"id": "other", "cwd": "/wrong"}}
-        )
-        + "\n",
+        json.dumps({"type": "session_meta", "payload": {"id": "other", "cwd": "/wrong"}}) + "\n",
         encoding="utf-8",
     )
 
@@ -197,6 +227,51 @@ def test_plan_blocks_rollout_metadata_mismatch_and_digest_tampering(tmp_path: Pa
     accepted["record_count"] = 2
     with pytest.raises(InventoryError, match="digest verification"):
         validate_session_provenance_plan(accepted)
+
+
+def test_plan_blocks_unproved_or_mismatched_live_account(tmp_path: Path) -> None:
+    inventory, binding_plan, _project, _rollout = _sources(tmp_path)
+    topics = inventory["topics"]
+    assert isinstance(topics, list) and isinstance(topics[0], dict)
+    topics[0]["live_codex_process"] = {
+        "verified": False,
+        "code": "LIVE_CODEX_ACCOUNT_UNVERIFIED",
+    }
+    inventory["inventory_digest"] = _digest(
+        {key: value for key, value in inventory.items() if key != "inventory_digest"}
+    )
+    binding_plan = build_binding_migration_plan(inventory, generation_id="migration-1")
+
+    missing = build_session_provenance_plan(inventory, binding_plan)
+
+    assert missing["accepted"] is False
+    assert missing["blockers"] == [
+        {
+            "source_ref": "agent-1/-1001/42",
+            "code": "LIVE_ACCOUNT_EVIDENCE_MISSING",
+        }
+    ]
+
+    inventory, binding_plan, _project, _rollout = _sources(tmp_path / "mismatch")
+    topics = inventory["topics"]
+    assert isinstance(topics, list) and isinstance(topics[0], dict)
+    process = topics[0]["live_codex_process"]
+    assert isinstance(process, dict)
+    process["account_profile"] = "personal"
+    inventory["inventory_digest"] = _digest(
+        {key: value for key, value in inventory.items() if key != "inventory_digest"}
+    )
+    binding_plan = build_binding_migration_plan(inventory, generation_id="migration-1")
+
+    mismatch = build_session_provenance_plan(inventory, binding_plan)
+
+    assert mismatch["accepted"] is False
+    assert mismatch["blockers"] == [
+        {
+            "source_ref": "agent-1/-1001/42",
+            "code": "LIVE_ACCOUNT_PROFILE_MISMATCH",
+        }
+    ]
 
 
 def test_store_import_is_idempotent_immutable_and_atomic(tmp_path: Path) -> None:
@@ -223,7 +298,10 @@ def test_store_import_is_idempotent_immutable_and_atomic(tmp_path: Path) -> None
         store.close()
 
 
-def test_daemon_reverifies_rollout_identity_before_import(tmp_path: Path) -> None:
+def test_daemon_reverifies_process_and_rollout_identity_before_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     inventory, binding_plan, project, rollout = _sources(tmp_path)
     plan = build_session_provenance_plan(inventory, binding_plan)
     profile = tmp_path / "profiles" / "work"
@@ -246,6 +324,10 @@ def test_daemon_reverifies_rollout_identity_before_import(tmp_path: Path) -> Non
         upstream_sha="0" * 40,
         allowed_project_roots=(tmp_path,),
     )
+    monkeypatch.setattr(
+        "ai_agent_runtime.daemon.server._verify_legacy_process_evidence",
+        lambda *_args, **_kwargs: None,
+    )
     daemon = RuntimeServer(config)
     _seed_store(daemon.store, project, profile)
     try:
@@ -253,6 +335,20 @@ def test_daemon_reverifies_rollout_identity_before_import(tmp_path: Path) -> Non
         assert response["ok"] is True
         assert response["imported"] == 1
         assert daemon.store.session_owner("session-42") == ("binding-42", "work")
+
+        def reject_process(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "process evidence changed")
+
+        monkeypatch.setattr(
+            "ai_agent_runtime.daemon.server._verify_legacy_process_evidence",
+            reject_process,
+        )
+        with pytest.raises(RuntimeFailureError, match="process evidence changed"):
+            daemon._import_session_provenance("request-process-change", {"plan": plan})
+        monkeypatch.setattr(
+            "ai_agent_runtime.daemon.server._verify_legacy_process_evidence",
+            lambda *_args, **_kwargs: None,
+        )
 
         changed = copy.deepcopy(plan)
         changed_records = changed["records"]
@@ -267,7 +363,10 @@ def test_daemon_reverifies_rollout_identity_before_import(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_provenance_import_ipc_is_durable_and_idempotent(tmp_path: Path) -> None:
+async def test_provenance_import_ipc_is_durable_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     inventory, binding_plan, project, _rollout = _sources(tmp_path)
     plan = build_session_provenance_plan(inventory, binding_plan)
     profile = tmp_path / "profiles" / "work"
@@ -306,6 +405,10 @@ async def test_provenance_import_ipc_is_durable_and_idempotent(tmp_path: Path) -
         tmux_state_path=tmux_state,
         upstream_sha="0" * 40,
         allowed_project_roots=(tmp_path,),
+    )
+    monkeypatch.setattr(
+        "ai_agent_runtime.daemon.server._verify_legacy_process_evidence",
+        lambda *_args, **_kwargs: None,
     )
     daemon = RuntimeServer(config)
     _seed_store(daemon.store, project, profile)

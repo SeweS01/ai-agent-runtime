@@ -219,11 +219,18 @@ ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml provenance import \
 
 Planning is read-only. It accepts a session only when the inventory and binding-plan
 digests match, the binding is `READY`, upstream state provides one session ID and
-rollout path, and the owned rollout's first `session_meta` record proves that exact
-session ID and canonical cwd. It records only path/device/inode/size metadata, never
-prompt or transcript content. Import re-opens every rollout and requires unchanged
-filesystem identity before atomically inserting immutable binding/account ownership;
-repeating the same digest-bound import is idempotent.
+rollout path, and the sole exact live tmux pane proves its current Codex account.
+That account proof binds pane PID, Linux process starttime/UID, canonical process cwd,
+qualified real-Codex binary digest, and a safe direct-child `CODEX_HOME` beneath the
+configured profiles root. The observed account must equal the reviewed binding-plan
+account. The owned rollout's first `session_meta` record must also prove the exact
+session ID and canonical cwd. The artifact records only sanitized process identity
+and path/device/inode/size metadata, never arbitrary environment, credentials, prompt,
+or transcript content. Import revalidates the live process identity, executable,
+cwd and `CODEX_HOME`, then re-opens every rollout and requires unchanged filesystem
+identity before atomically inserting immutable binding/account ownership. If the
+legacy process exits or changes between planning and import, the import fails closed;
+repeating the same digest-bound import while evidence remains valid is idempotent.
 
 This migration deliberately covers only sessions whose topic ownership is proven by
 the exact upstream state at inventory time. Older picker entries without such proof
@@ -241,8 +248,10 @@ The same inventory command is the M1 shadow-mode observer when it runs before th
 - `UNKNOWN` means identity, cwd, state, or pane evidence is malformed, conflicting,
   or ambiguous.
 
-Even `OBSERVED_VERIFIED` explicitly does not prove account, `CODEX_HOME`, model,
-reasoning, or applied revision. Those facts require Runtime process evidence after
+`OBSERVED_VERIFIED` by itself does not prove account, `CODEX_HOME`, model, reasoning,
+or applied revision. A separate `live_codex_process` inventory field may prove the
+legacy account for provenance planning; this does not upgrade shadow confidence or
+claim model/reasoning/revision. Full applied facts require Runtime process evidence after
 cutover; shadow observation never promotes cwd or process name into AppliedSpec.
 
 Session-storage candidates follow a separate manifest-and-stage workflow documented

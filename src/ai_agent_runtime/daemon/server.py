@@ -37,6 +37,9 @@ from ai_agent_runtime.migration.session_provenance import (
 )
 from ai_agent_runtime.process_safety import (
     file_sha256,
+    proc_environment,
+    proc_starttime,
+    proc_uid,
     process_executable_evidence,
     profile_fingerprint,
     retire_tmux_session,
@@ -66,6 +69,72 @@ from ai_agent_runtime.telegram_upstream.topic_config import (
     reconcile_managed_topic,
     reconcile_managed_topics,
 )
+
+
+def _verify_legacy_process_evidence(
+    config: RuntimeConfig,
+    live_process: dict[str, object],
+    *,
+    canonical_cwd: str,
+    account_profile: str,
+) -> None:
+    """Revalidate the exact legacy Codex process immediately before import."""
+
+    live_pid = _required_int(live_process, "pid")
+    live_starttime = _required_int(live_process, "starttime")
+    live_uid = _required_int(live_process, "uid")
+    live_codex_home = _required_str(live_process, "codex_home")
+    live_account = _required_str(live_process, "account_profile")
+    if (
+        isinstance(live_pid, bool)
+        or isinstance(live_starttime, bool)
+        or isinstance(live_uid, bool)
+        or live_pid <= 0
+        or live_starttime <= 0
+        or live_uid != os.getuid()
+        or live_account != account_profile
+        or len(live_codex_home) > 4096
+        or len(live_account) > 128
+        or any(character in live_codex_home for character in ("\x00", "\n", "\r"))
+        or any(character in live_account for character in ("\x00", "\n", "\r"))
+    ):
+        raise RuntimeFailureError(
+            ErrorCode.INVALID_REQUEST,
+            "session provenance live process identity is invalid",
+        )
+    try:
+        if proc_uid(live_pid) != live_uid:
+            raise ValueError("UID mismatch")
+        if proc_starttime(live_pid) != live_starttime:
+            raise ValueError("starttime mismatch")
+        if Path(f"/proc/{live_pid}/cwd").resolve(strict=True) != Path(canonical_cwd).resolve(
+            strict=True
+        ):
+            raise ValueError("cwd mismatch")
+        profile = validate_profile_path(
+            Path(live_codex_home),
+            root=config.profiles_root,
+            uid=live_uid,
+        )
+        if (
+            profile.parent != config.profiles_root.resolve(strict=True)
+            or profile.name != account_profile
+            or proc_environment(live_pid).get("CODEX_HOME") != str(profile)
+        ):
+            raise ValueError("profile mismatch")
+        verify_process_executable_evidence(
+            live_pid,
+            live_process.get("executable"),
+            verify_digest=True,
+        )
+        if proc_starttime(live_pid) != live_starttime:
+            raise ValueError("process identity changed during verification")
+    except (OSError, RuntimeFailureError, UnicodeError, ValueError) as exc:
+        raise RuntimeFailureError(
+            ErrorCode.INVALID_REQUEST,
+            "session provenance live account evidence changed after planning",
+        ) from exc
+
 
 _PEERCRED = struct.Struct("3i")
 
@@ -877,6 +946,7 @@ class RuntimeServer:
                 "account_profile",
                 "canonical_cwd",
                 "session_id",
+                "live_process",
                 "rollout_path",
                 "rollout_device",
                 "rollout_inode",
@@ -894,6 +964,19 @@ class RuntimeServer:
             canonical_cwd = _required_str(record, "canonical_cwd")
             session_id = _required_str(record, "session_id")
             rollout_path = _required_str(record, "rollout_path")
+            live_process = record.get("live_process")
+            if not isinstance(live_process, dict) or set(live_process) != {
+                "pid",
+                "starttime",
+                "uid",
+                "codex_home",
+                "account_profile",
+                "executable",
+            }:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "session provenance live process evidence is invalid",
+                )
             if any(
                 len(value) > maximum or "\x00" in value or "\n" in value or "\r" in value
                 for value, maximum in (
@@ -957,6 +1040,12 @@ class RuntimeServer:
                     ErrorCode.INVALID_REQUEST,
                     "session provenance account does not match effective spec",
                 )
+            _verify_legacy_process_evidence(
+                self.config,
+                live_process,
+                canonical_cwd=canonical_cwd,
+                account_profile=account_profile,
+            )
             observed = inspect_rollout_session(
                 Path(rollout_path),
                 expected_session_id=session_id,

@@ -80,8 +80,11 @@ ID with different data fails closed.
 `ai-agent-runtime.session-provenance-plan.v1` artifact after the authoritative
 binding snapshot has been applied. The plan is self-digested and bound to exact
 inventory and binding-plan digests. Runtime independently checks AgentInstance,
-source ref, configured binding, canonical cwd and effective account, then re-opens
-each rollout with no-follow semantics and revalidates its first `session_meta` plus
+source ref, configured binding, canonical cwd and effective account. Planning also
+requires sanitized live-process evidence binding the sole tmux pane to the qualified
+real-Codex digest and a safe `CODEX_HOME` profile matching that account. Runtime
+revalidates that same live process immediately before import, then re-opens each
+rollout with no-follow semantics and revalidates its first `session_meta` plus
 path/device/inode/size. All ownership rows are inserted in one transaction. Existing
 identical rows are no-ops; changing an existing session owner or rollout identity is
 rejected. The CLI derives a stable request ID from the plan digest, so lost-ACK retry

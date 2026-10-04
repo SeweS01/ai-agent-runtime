@@ -101,10 +101,7 @@ def inspect_rollout_session(
         raise InventoryError("session rollout cwd does not match binding")
     resolved = path.resolve(strict=True)
     resolved_metadata = resolved.stat()
-    if (
-        resolved_metadata.st_dev != metadata.st_dev
-        or resolved_metadata.st_ino != metadata.st_ino
-    ):
+    if resolved_metadata.st_dev != metadata.st_dev or resolved_metadata.st_ino != metadata.st_ino:
         raise InventoryError("session rollout path identity changed during inspection")
     return {
         "rollout_path": str(resolved),
@@ -176,9 +173,7 @@ def build_session_provenance_plan(
             continue
         entry = entries.get(source_ref)
         if entry is None or entry.get("status") != "READY":
-            blockers.append(
-                {"source_ref": source_ref, "code": "BINDING_PLAN_NOT_READY"}
-            )
+            blockers.append({"source_ref": source_ref, "code": "BINDING_PLAN_NOT_READY"})
             continue
         desired = entry.get("desired")
         identity = entry.get("identity")
@@ -188,14 +183,58 @@ def build_session_provenance_plan(
         agent_instance_id = _nonempty(
             identity.get("agent_instance_id"), "agent_instance_id", maximum=64
         )
-        account_profile = _nonempty(
-            desired.get("account_profile"), "account_profile", maximum=128
-        )
-        canonical_cwd = _nonempty(
-            identity.get("canonical_cwd"), "canonical_cwd", maximum=4096
-        )
+        account_profile = _nonempty(desired.get("account_profile"), "account_profile", maximum=128)
+        canonical_cwd = _nonempty(identity.get("canonical_cwd"), "canonical_cwd", maximum=4096)
         if agent_instance_id not in agent_instances:
             raise InventoryError("binding plan AgentInstance does not match inventory")
+        live_panes = topic.get("live_tmux_panes")
+        live_process = topic.get("live_codex_process")
+        if (
+            not isinstance(live_panes, list)
+            or len(live_panes) != 1
+            or not isinstance(live_panes[0], dict)
+            or not isinstance(live_process, dict)
+            or live_process.get("verified") is not True
+        ):
+            blockers.append({"source_ref": source_ref, "code": "LIVE_ACCOUNT_EVIDENCE_MISSING"})
+            continue
+        pane_pid = live_panes[0].get("pane_pid")
+        process_pid = live_process.get("pid")
+        process_starttime = live_process.get("starttime")
+        process_uid = live_process.get("uid")
+        if (
+            not isinstance(pane_pid, int)
+            or isinstance(pane_pid, bool)
+            or pane_pid <= 0
+            or process_pid != pane_pid
+            or not isinstance(process_starttime, int)
+            or isinstance(process_starttime, bool)
+            or process_starttime <= 0
+            or not isinstance(process_uid, int)
+            or isinstance(process_uid, bool)
+            or process_uid < 0
+        ):
+            blockers.append({"source_ref": source_ref, "code": "LIVE_ACCOUNT_EVIDENCE_INVALID"})
+            continue
+        binary_sha256 = _sha256(live_process.get("binary_sha256"), "live binary_sha256")
+        _nonempty(live_process.get("codex_home"), "live codex_home", maximum=4096)
+        observed_account = _nonempty(
+            live_process.get("account_profile"),
+            "live account_profile",
+            maximum=128,
+        )
+        if observed_account != account_profile:
+            blockers.append(
+                {
+                    "source_ref": source_ref,
+                    "code": "LIVE_ACCOUNT_PROFILE_MISMATCH",
+                }
+            )
+            continue
+        executable = live_process.get("executable")
+        if not isinstance(executable, dict) or executable.get("sha256") != binary_sha256:
+            blockers.append({"source_ref": source_ref, "code": "LIVE_ACCOUNT_EVIDENCE_INVALID"})
+            continue
         for raw_state in state_rows:
             if not isinstance(raw_state, dict):
                 blockers.append({"source_ref": source_ref, "code": "TMUX_STATE_MALFORMED"})
@@ -247,6 +286,14 @@ def build_session_provenance_plan(
                     "account_profile": account_profile,
                     "canonical_cwd": canonical_cwd,
                     "session_id": session_id,
+                    "live_process": {
+                        "pid": process_pid,
+                        "starttime": process_starttime,
+                        "uid": process_uid,
+                        "codex_home": live_process["codex_home"],
+                        "account_profile": observed_account,
+                        "executable": executable,
+                    },
                     **rollout,
                 }
             )
