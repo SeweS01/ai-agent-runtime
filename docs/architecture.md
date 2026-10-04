@@ -59,6 +59,15 @@ Fail-closed launch paths that require a user explanation enqueue a sanitized,
 binding-scoped notification event. Runtime never receives a Telegram token and never
 sends that message itself; the CUS connector and CUS Bot remain the delivery adapter.
 
+## Local filesystem boundary
+
+The Runtime database must remain under its configured private state directory. The
+daemon refuses symlinked, foreign-owned, or group/world-writable database and socket
+locations. Startup removes only a stale Unix socket owned by the Runtime user; it
+never unlinks a regular file or symlink at the configured path. Shutdown records the
+created socket inode and removes it only if the path still identifies that exact
+socket, preventing a replacement path from being deleted.
+
 ## Current implementation milestone
 
 The executable launch skeleton, durable/idempotent local protocol, incremental and
@@ -68,6 +77,8 @@ resynchronization, qualified Codex rollout observation, exact-target retirement,
 read-only operator diagnostics, and fail-closed policies are implemented and tested.
 Retirement remains disabled by default and requires a qualification report
 identifier. A deterministic pinned-upstream retirement harness exists, but only a
-staging artifact can satisfy the release gate. Real Telegram/Codex E2E, session
-storage lifecycle, and rollback-drill evidence remain production release blockers.
-This milestone is not a production release.
+staging artifact can satisfy the release gate. Pinned-upstream source qualification
+now emits release-tuple-bound evidence, and rollback inputs can be pinned and
+reverified without authorizing cleanup. Real Telegram/Codex E2E, session storage
+lifecycle, and rollback-drill evidence remain production release blockers. This
+milestone is not a production release.

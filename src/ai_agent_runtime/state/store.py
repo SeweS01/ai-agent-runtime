@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import time
 from pathlib import Path
 
@@ -131,8 +132,26 @@ CREATE TABLE IF NOT EXISTS codex_rollout_observers (
 class RuntimeStore:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.path.parent, 0o700)
+        parent = self.path.parent
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if parent.is_symlink():
+            raise ValueError("Runtime database directory must not be a symlink")
+        parent_metadata = parent.stat()
+        if not stat.S_ISDIR(parent_metadata.st_mode) or parent_metadata.st_uid != os.getuid():
+            raise ValueError("Runtime database directory ownership/type is unsafe")
+        if parent_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError("Runtime database directory is group/world writable")
+        os.chmod(parent, 0o700)
+        if self.path.is_symlink():
+            raise ValueError("Runtime database must not be a symlink")
+        if self.path.exists():
+            database_metadata = self.path.stat()
+            if (
+                not stat.S_ISREG(database_metadata.st_mode)
+                or database_metadata.st_uid != os.getuid()
+                or database_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                raise ValueError("Runtime database ownership/type/mode is unsafe")
         self._connection = sqlite3.connect(path)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys=ON")

@@ -64,6 +64,52 @@ from ai_agent_runtime.telegram_upstream.topic_config import (
 _PEERCRED = struct.Struct("3i")
 
 
+def _prepare_runtime_socket(path: Path) -> None:
+    """Create a private socket directory and remove only an owned stale socket."""
+
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if parent.is_symlink():
+        raise ValueError("Runtime socket directory must not be a symlink")
+    parent_metadata = parent.stat()
+    if not stat.S_ISDIR(parent_metadata.st_mode) or parent_metadata.st_uid != os.getuid():
+        raise ValueError("Runtime socket directory ownership/type is unsafe")
+    if parent_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError("Runtime socket directory is group/world writable")
+    os.chmod(parent, 0o700)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError("Runtime socket path must not be a symlink")
+    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise ValueError("refusing to replace non-socket or foreign Runtime socket path")
+    path.unlink()
+
+
+def _socket_identity(path: Path) -> tuple[int, int]:
+    metadata = path.lstat()
+    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise ValueError("created Runtime socket ownership/type is unsafe")
+    return metadata.st_dev, metadata.st_ino
+
+
+def _unlink_runtime_socket(path: Path, identity: tuple[int, int]) -> None:
+    """Remove the daemon's own socket only if the path still names that inode."""
+
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        stat.S_ISSOCK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and (metadata.st_dev, metadata.st_ino) == identity
+    ):
+        path.unlink()
+
+
 class RuntimeServer:
     def __init__(
         self,
@@ -86,11 +132,10 @@ class RuntimeServer:
         self._results: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
 
     async def serve(self) -> None:
-        self.config.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.config.socket_path.parent, 0o700)
-        self.config.socket_path.unlink(missing_ok=True)
+        _prepare_runtime_socket(self.config.socket_path)
         server = await asyncio.start_unix_server(self._handle, path=self.config.socket_path)
         os.chmod(self.config.socket_path, 0o600)
+        socket_identity = _socket_identity(self.config.socket_path)
         watchdog = asyncio.create_task(watchdog_loop())
         reconciler = asyncio.create_task(self._reconcile_topic_config_loop())
         evidence_collector = asyncio.create_task(self._collect_applied_evidence_loop())
@@ -123,7 +168,7 @@ class RuntimeServer:
             if retirement is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await retirement
-            self.config.socket_path.unlink(missing_ok=True)
+            _unlink_runtime_socket(self.config.socket_path, socket_identity)
             self.store.close()
 
     async def _handle(

@@ -118,6 +118,9 @@ class RuntimeConfig:
         ):
             raise ValueError("telegram_agent.upstream_sha must be a lowercase 40-char commit SHA")
         for name, value in {
+            "state_dir": self.state_dir,
+            "socket_path": self.socket_path,
+            "database_path": self.database_path,
             "real_codex": self.real_codex,
             "profiles_root": self.profiles_root,
             "topic_config_path": self.topic_config_path,
@@ -125,6 +128,14 @@ class RuntimeConfig:
         }.items():
             if not value.is_absolute():
                 raise ValueError(f"{name} must be absolute")
+            if value == Path("/") or ".." in value.parts:
+                raise ValueError(f"{name} must be a non-root traversal-free path")
+        lexical_state = Path(os.path.abspath(self.state_dir))
+        lexical_database = Path(os.path.abspath(self.database_path))
+        if lexical_database != lexical_state and lexical_state not in lexical_database.parents:
+            raise ValueError("database_path must be contained by state_dir")
+        if self.socket_path.parent == Path("/"):
+            raise ValueError("socket_path must use a private non-root directory")
         if not self.allowed_project_roots:
             raise ValueError("policy.allowed_project_roots must not be empty")
         if any(not root.is_absolute() for root in self.allowed_project_roots):
