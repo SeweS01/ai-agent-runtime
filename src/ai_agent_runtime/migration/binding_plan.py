@@ -111,23 +111,37 @@ def build_binding_migration_plan(
             if isinstance(raw_issues, list)
             else ["TOPIC_ISSUES_MALFORMED"]
         )
+        if _string(topic.get("name")) is None:
+            blockers.append("TOPIC_NAME_MISSING")
         engine = _string(topic.get("engine")) or "claude"
         exec_mode = _string(topic.get("exec_mode")) or "subprocess"
         if engine != "codex":
+            if canonical_cwd is None:
+                blockers.append("CANONICAL_CWD_MISSING")
+                binding_id = _stable_id("rb", source_ref)
+                project_id = None
+                desired = None
+            else:
+                binding_id, project_id, desired = _desired_from_cus(
+                    topic=topic,
+                    generation_id=generation_id,
+                    blockers=blockers,
+                )
             entries.append(
                 {
                     "source_ref": source_ref,
-                    "status": "UNMANAGED",
-                    "binding_id": None,
-                    "project_id": None,
+                    "status": "BLOCKED" if blockers else "UNMANAGED",
+                    "binding_id": binding_id,
+                    "project_id": project_id,
                     "identity": {
                         "agent_instance_id": topic.get("agent_instance_id"),
                         "chat_id": topic.get("chat_id"),
                         "thread_id": topic.get("thread_id"),
+                        "topic_name": topic.get("name"),
                         "canonical_cwd": canonical_cwd,
                     },
-                    "desired": None,
-                    "blockers": [],
+                    "desired": desired if not blockers else None,
+                    "blockers": sorted(set(blockers)),
                 }
             )
             continue
@@ -154,6 +168,7 @@ def build_binding_migration_plan(
                     "agent_instance_id": topic.get("agent_instance_id"),
                     "chat_id": topic.get("chat_id"),
                     "thread_id": topic.get("thread_id"),
+                    "topic_name": topic.get("name"),
                     "canonical_cwd": canonical_cwd,
                 },
                 "desired": desired if not blockers else None,

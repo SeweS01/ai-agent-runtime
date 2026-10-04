@@ -41,11 +41,15 @@ action and requires `apply_snapshot`.
 
 `apply_snapshot` is the only action allowed to introduce a new generation. It
 contains the complete AgentInstance desired inventory, one common generation, a
-canonical snapshot digest, and explicit `retired_binding_ids`. Runtime validates all
-identities, profiles, digests, topic keys, and inventory coverage before one batched
-topic-config replacement and one SQLite transaction. Existing bindings may not be
-silently omitted. Retirement disables future managed launches and removes the local
-effective spec, but preserves binding, instance, and session-provenance history.
+canonical snapshot digest, explicit `unmanaged_bindings`, and explicit
+`retired_binding_ids`. Runtime validates all identities, profiles, digests, topic
+keys, and inventory coverage before one batched topic-config replacement and one
+SQLite transaction. Existing bindings may not be silently omitted. An unmanaged
+binding retains its identity and verified local desired profile, but Runtime does not
+rewrite its non-Codex engine or authorize a Codex launch. A later observed return to
+`codex+tmux` can restore managed operation through fresh Phase A/Phase B verification.
+Retirement disables future managed launches and removes the local effective spec,
+but preserves binding, instance, and session-provenance history.
 
 This protocol is local execution control, not a public CUS backend API. The CUS
 backend remains provider-neutral and talks through its Runtime connector.

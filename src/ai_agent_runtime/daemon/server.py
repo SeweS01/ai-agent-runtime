@@ -456,13 +456,19 @@ class RuntimeServer:
         generation_id = _required_str(payload, "generation_id")
         snapshot_digest = _required_str(payload, "snapshot_digest")
         raw_items = payload.get("bindings")
+        unmanaged_present = "unmanaged_bindings" in payload
+        raw_unmanaged = payload.get("unmanaged_bindings", [])
         raw_retired = payload.get("retired_binding_ids", [])
-        if not isinstance(raw_items, list) or not isinstance(raw_retired, list):
+        if (
+            not isinstance(raw_items, list)
+            or not isinstance(raw_unmanaged, list)
+            or not isinstance(raw_retired, list)
+        ):
             raise RuntimeFailureError(
                 ErrorCode.INVALID_REQUEST,
-                "bindings and retired_binding_ids must be arrays",
+                "bindings, unmanaged_bindings and retired_binding_ids must be arrays",
             )
-        if len(raw_items) > 1000 or len(raw_retired) > 1000:
+        if len(raw_items) + len(raw_unmanaged) > 1000 or len(raw_retired) > 1000:
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "snapshot is too large")
         if any(not isinstance(value, str) or not value for value in raw_retired):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "invalid retired binding id")
@@ -470,6 +476,7 @@ class RuntimeServer:
         if len(retired) != len(raw_retired):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "duplicate retired binding id")
         normalized_items: list[dict[str, Any]] = []
+        normalized_unmanaged: list[dict[str, Any]] = []
         prepared: list[tuple[RuntimeBinding, DesiredSpec, Path, str]] = []
         managed_topics: dict[int, str] = {}
         binding_ids: set[str] = set()
@@ -505,6 +512,56 @@ class RuntimeServer:
             prepared.append((binding, spec, codex_home, fingerprint))
             normalized_items.append({"binding": raw_binding, "desired": raw_desired})
 
+        for raw_item in raw_unmanaged:
+            if not isinstance(raw_item, dict):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "unmanaged snapshot item must be object",
+                )
+            raw_binding = raw_item.get("binding")
+            raw_desired = raw_item.get("desired")
+            if not isinstance(raw_binding, dict) or not isinstance(raw_desired, dict):
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "unmanaged snapshot item requires binding and desired objects",
+                )
+            binding, spec, codex_home, fingerprint = self._validate_snapshot_item(
+                raw_binding,
+                raw_desired,
+                generation_id=generation_id,
+            )
+            if binding.binding_id in binding_ids or binding.expected_tmux_session in tmux_sessions:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "snapshot contains duplicate binding or tmux identity",
+                )
+            if binding.thread_id in managed_topics:
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "snapshot contains duplicate Telegram topic",
+                )
+            binding_ids.add(binding.binding_id)
+            tmux_sessions.add(binding.expected_tmux_session)
+            prepared.append(
+                (
+                    RuntimeBinding(
+                        binding_id=binding.binding_id,
+                        agent_instance_id=binding.agent_instance_id,
+                        chat_id=binding.chat_id,
+                        thread_id=binding.thread_id,
+                        project_id=binding.project_id,
+                        canonical_cwd=binding.canonical_cwd,
+                        expected_tmux_session=binding.expected_tmux_session,
+                        configured=True,
+                        management_mode=ManagementMode.UNMANAGED,
+                    ),
+                    spec,
+                    codex_home,
+                    fingerprint,
+                )
+            )
+            normalized_unmanaged.append({"binding": raw_binding, "desired": raw_desired})
+
         digest_material = {
             "agent_instance_id": agent_instance_id,
             "generation_id": generation_id,
@@ -514,6 +571,11 @@ class RuntimeServer:
             ),
             "retired_binding_ids": sorted(retired),
         }
+        if unmanaged_present:
+            digest_material["unmanaged_bindings"] = sorted(
+                normalized_unmanaged,
+                key=lambda item: str(item["binding"].get("binding_id", "")),
+            )
         if snapshot_digest != sha256_digest(digest_material):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "snapshot digest mismatch")
 
@@ -563,6 +625,28 @@ class RuntimeServer:
                 raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
 
         snapshot = read_topic_config(self.config.topic_config_path)
+        for binding, _spec, _home, _fingerprint in prepared:
+            if binding.management_mode != ManagementMode.UNMANAGED:
+                continue
+            entry = snapshot.topic(binding.thread_id)
+            if entry is None:
+                raise RuntimeFailureError(
+                    ErrorCode.CONFIG_DRIFT,
+                    "unmanaged binding topic is absent",
+                )
+            if entry.engine == "codex":
+                raise RuntimeFailureError(
+                    ErrorCode.INVALID_REQUEST,
+                    "codex topic cannot be imported as unmanaged",
+                )
+            if (
+                entry.cwd is None
+                or Path(entry.cwd).resolve() != Path(binding.canonical_cwd).resolve()
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.CONFIG_DRIFT,
+                    "unmanaged binding cwd differs from topic config",
+                )
         if managed_topics:
             for _ in range(3):
                 try:
@@ -594,7 +678,7 @@ class RuntimeServer:
                     expected_tmux_session=binding.expected_tmux_session,
                     configured=True,
                     config_digest=snapshot.digest,
-                    management_mode=ManagementMode.MANAGED,
+                    management_mode=binding.management_mode,
                 ),
                 spec,
                 codex_home,
@@ -617,7 +701,16 @@ class RuntimeServer:
             agent_instance_id=agent_instance_id,
             generation_id=generation_id,
             snapshot_digest=snapshot_digest,
-            applied_bindings=sorted(active_ids),
+            applied_bindings=sorted(
+                binding.binding_id
+                for binding, _spec, _home, _fingerprint in finalized
+                if binding.management_mode == ManagementMode.MANAGED
+            ),
+            unmanaged_bindings=sorted(
+                binding.binding_id
+                for binding, _spec, _home, _fingerprint in finalized
+                if binding.management_mode == ManagementMode.UNMANAGED
+            ),
             retired_bindings=sorted(retired),
             config_digest=snapshot.digest,
         )

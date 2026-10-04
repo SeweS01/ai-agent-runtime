@@ -13,6 +13,7 @@ def _topic(thread_id: int, *, binding_id: str, project_id: str) -> dict[str, obj
         "agent_instance_id": "agent-1",
         "chat_id": -1001,
         "thread_id": thread_id,
+        "name": f"Topic {thread_id}",
         "canonical_cwd": cwd,
         "engine": "codex",
         "exec_mode": "tmux",
@@ -92,3 +93,19 @@ def test_plan_blocks_duplicate_binding_and_project_identity_conflicts() -> None:
         assert entry["desired"] is None
         assert "DUPLICATE_BINDING_ID" in entry["blockers"]
         assert "PROJECT_ID_CONFLICT_FOR_CANONICAL_CWD" in entry["blockers"]
+
+
+def test_plan_preserves_non_codex_topic_as_unmanaged_binding_with_profile() -> None:
+    inventory = _inventory()
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    topics[0]["engine"] = "claude"
+    topics[0]["exec_mode"] = "subprocess"
+    plan = build_binding_migration_plan(inventory, generation_id="migration-1")
+    entries = plan["entries"]
+    assert isinstance(entries, list)
+    first = entries[0]
+    assert first["status"] == "UNMANAGED"
+    assert first["binding_id"] == "binding-42"
+    assert first["desired"]["account_profile"] == "account-42"
+    assert first["identity"]["topic_name"] == "Topic 42"

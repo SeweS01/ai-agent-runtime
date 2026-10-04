@@ -68,5 +68,8 @@ ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory plan-binding
   --output /var/lib/ai-agent-runtime/migration/binding-plan.json
 ```
 
-The plan is evidence, not an apply command. It must be reconciled with CUS and
-the Runtime snapshot protocol in a later migration stage.
+The plan is evidence, not an apply command. Import it into CUS with the separately
+versioned `cus-runtime-migration-import` tool. Run that tool without `--commit` first;
+only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends one
+authoritative Runtime snapshot, keeping non-Codex entries explicitly `UNMANAGED`
+instead of rewriting their Telegram Agent engine.
