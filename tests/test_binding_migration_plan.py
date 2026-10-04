@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
+from ai_agent_runtime.domain import sha256_digest
 from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
-from ai_agent_runtime.migration.inventory import INVENTORY_SCHEMA
+from ai_agent_runtime.migration.inventory import INVENTORY_SCHEMA, InventoryError
 
 
 def _topic(thread_id: int, *, binding_id: str, project_id: str) -> dict[str, object]:
@@ -109,3 +112,80 @@ def test_plan_preserves_non_codex_topic_as_unmanaged_binding_with_profile() -> N
     assert first["binding_id"] == "binding-42"
     assert first["desired"]["account_profile"] == "account-42"
     assert first["identity"]["topic_name"] == "Topic 42"
+
+
+def test_owner_decision_can_explicitly_exclude_deleted_topic() -> None:
+    inventory = _inventory()
+    topics = inventory["topics"]
+    assert isinstance(topics, list)
+    topics[0]["canonical_cwd"] = None
+    topics[0]["cus_bindings"] = []
+    base = build_binding_migration_plan(inventory, generation_id="migration-1")
+    assert base["accepted"] is False
+    decisions: dict[str, object] = {
+        "schema": "ai-agent-runtime.binding-migration-decisions.v1",
+        "source_inventory_digest": inventory["inventory_digest"],
+        "source_binding_plan_digest": base["plan_digest"],
+        "approved_by_role": "owner",
+        "approved_at": "2026-10-04T12:00:00+03:00",
+        "decisions": [
+            {
+                "source_ref": "agent-1/-1001/42",
+                "binding_id": base["entries"][0]["binding_id"],
+                "thread_id": 42,
+                "topic_name": "Topic 42",
+                "action": "EXCLUDE_DELETED_TOPIC",
+                "reason": "Topic no longer exists in the Telegram forum",
+            }
+        ],
+    }
+    decisions["decisions_digest"] = sha256_digest(decisions)
+
+    resolved = build_binding_migration_plan(
+        inventory,
+        generation_id="migration-1",
+        decisions=decisions,
+    )
+
+    assert resolved["accepted"] is True
+    assert resolved["counts"] == {
+        "READY": 1,
+        "UNMANAGED": 0,
+        "EXCLUDED": 1,
+        "BLOCKED": 0,
+    }
+    excluded = resolved["entries"][0]
+    assert excluded["status"] == "EXCLUDED"
+    assert excluded["desired"] is None
+    assert excluded["blockers"] == []
+    assert excluded["exclusion"]["decisions_digest"] == decisions["decisions_digest"]
+
+
+def test_exclusion_decision_is_bound_to_exact_inventory_plan_and_identity() -> None:
+    inventory = _inventory()
+    base = build_binding_migration_plan(inventory, generation_id="migration-1")
+    decisions: dict[str, object] = {
+        "schema": "ai-agent-runtime.binding-migration-decisions.v1",
+        "source_inventory_digest": inventory["inventory_digest"],
+        "source_binding_plan_digest": base["plan_digest"],
+        "approved_by_role": "owner",
+        "approved_at": "2026-10-04T12:00:00+03:00",
+        "decisions": [
+            {
+                "source_ref": "agent-1/-1001/42",
+                "binding_id": "binding-42",
+                "thread_id": 999,
+                "topic_name": "Topic 42",
+                "action": "EXCLUDE_DELETED_TOPIC",
+                "reason": "Deleted",
+            }
+        ],
+    }
+    decisions["decisions_digest"] = sha256_digest(decisions)
+
+    with pytest.raises(InventoryError, match="thread identity mismatch"):
+        build_binding_migration_plan(
+            inventory,
+            generation_id="migration-1",
+            decisions=decisions,
+        )

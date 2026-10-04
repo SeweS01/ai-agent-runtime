@@ -16,6 +16,7 @@ from ai_agent_runtime.migration.inventory import (
 )
 
 BINDING_PLAN_SCHEMA = "ai-agent-runtime.binding-migration-plan.v1"
+MIGRATION_DECISIONS_SCHEMA = "ai-agent-runtime.binding-migration-decisions.v1"
 
 
 def read_binding_migration_plan(path: Path) -> dict[str, object]:
@@ -29,6 +30,27 @@ def read_binding_migration_plan(path: Path) -> dict[str, object]:
     unsigned.pop("plan_digest", None)
     if supplied != _digest(unsigned):
         raise InventoryError("binding migration plan digest verification failed")
+    return payload
+
+
+def read_binding_migration_decisions(path: Path) -> dict[str, object]:
+    """Read a digest-protected owner decision artifact.
+
+    Decisions are deliberately separate from the inventory and base plan so a
+    missing topic configuration cannot be silently interpreted as permission to
+    drop it during migration.
+    """
+
+    payload, _sha256 = _read_json_object(path)
+    if payload.get("schema") != MIGRATION_DECISIONS_SCHEMA:
+        raise InventoryError("unsupported binding migration decisions schema")
+    supplied = payload.get("decisions_digest")
+    if not isinstance(supplied, str):
+        raise InventoryError("binding migration decisions digest is missing")
+    unsigned = dict(payload)
+    unsigned.pop("decisions_digest", None)
+    if supplied != _digest(unsigned):
+        raise InventoryError("binding migration decisions digest verification failed")
     return payload
 
 
@@ -102,6 +124,7 @@ def build_binding_migration_plan(
     inventory: dict[str, object],
     *,
     generation_id: str,
+    decisions: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Build a deterministic, non-mutating binding plan.
 
@@ -196,9 +219,24 @@ def build_binding_migration_plan(
             }
         )
 
+    decision_digest: str | None = None
+    if decisions is not None:
+        base_plan = build_binding_migration_plan(
+            inventory,
+            generation_id=generation_id,
+        )
+        decision_digest = _validate_and_apply_decisions(
+            inventory=inventory,
+            base_plan=base_plan,
+            entries=entries,
+            decisions=decisions,
+        )
+
     binding_sources: dict[str, list[str]] = defaultdict(list)
     cwd_projects: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for entry in entries:
+        if entry.get("status") == "EXCLUDED":
+            continue
         entry_binding_id = entry.get("binding_id")
         entry_source_ref = cast(str, entry["source_ref"])
         if isinstance(entry_binding_id, str):
@@ -219,6 +257,8 @@ def build_binding_migration_plan(
         if len(projects) > 1
     }
     for entry in entries:
+        if entry.get("status") == "EXCLUDED":
+            continue
         entry_source_ref = cast(str, entry["source_ref"])
         entry_blockers = cast(list[str], entry["blockers"])
         entry_binding_id = entry.get("binding_id")
@@ -234,9 +274,14 @@ def build_binding_migration_plan(
         assert entry_source_ref
 
     entries.sort(key=lambda entry: cast(str, entry["source_ref"]))
+    count_statuses = (
+        ("READY", "UNMANAGED", "EXCLUDED", "BLOCKED")
+        if decision_digest is not None
+        else ("READY", "UNMANAGED", "BLOCKED")
+    )
     counts = {
         status: sum(1 for entry in entries if entry["status"] == status)
-        for status in ("READY", "UNMANAGED", "BLOCKED")
+        for status in count_statuses
     }
     plan: dict[str, object] = {
         "schema": BINDING_PLAN_SCHEMA,
@@ -248,5 +293,79 @@ def build_binding_migration_plan(
         "conflicting_projects": conflicting_projects,
         "entries": entries,
     }
+    if decision_digest is not None:
+        plan["source_decisions_digest"] = decision_digest
     plan["plan_digest"] = _digest(plan)
     return plan
+
+
+def _validate_and_apply_decisions(
+    *,
+    inventory: dict[str, object],
+    base_plan: dict[str, object],
+    entries: list[dict[str, object]],
+    decisions: dict[str, object],
+) -> str:
+    """Apply explicit owner-approved exclusions to an otherwise fail-closed plan."""
+
+    if decisions.get("schema") != MIGRATION_DECISIONS_SCHEMA:
+        raise InventoryError("unsupported binding migration decisions schema")
+    supplied_digest = decisions.get("decisions_digest")
+    if not isinstance(supplied_digest, str):
+        raise InventoryError("binding migration decisions digest is missing")
+    unsigned = dict(decisions)
+    unsigned.pop("decisions_digest", None)
+    if supplied_digest != _digest(unsigned):
+        raise InventoryError("binding migration decisions digest verification failed")
+    if decisions.get("source_inventory_digest") != inventory.get("inventory_digest"):
+        raise InventoryError("binding migration decisions inventory digest mismatch")
+
+    # Bind approval to the exact unmodified planning input, including blockers.
+    if decisions.get("source_binding_plan_digest") != base_plan.get("plan_digest"):
+        raise InventoryError("binding migration decisions base plan digest mismatch")
+    if decisions.get("approved_by_role") != "owner":
+        raise InventoryError("binding migration decisions require owner approval")
+    approved_at = _string(decisions.get("approved_at"))
+    if approved_at is None:
+        raise InventoryError("binding migration decisions approval timestamp is missing")
+    raw_decisions = decisions.get("decisions")
+    if not isinstance(raw_decisions, list) or not raw_decisions:
+        raise InventoryError("binding migration decisions list is empty or malformed")
+
+    by_source = {cast(str, entry["source_ref"]): entry for entry in entries}
+    seen: set[str] = set()
+    for raw_decision in raw_decisions:
+        if not isinstance(raw_decision, dict):
+            raise InventoryError("binding migration decision is malformed")
+        source_ref = _string(raw_decision.get("source_ref"))
+        if source_ref is None or source_ref in seen:
+            raise InventoryError("binding migration decision source_ref is missing or duplicate")
+        seen.add(source_ref)
+        entry = by_source.get(source_ref)
+        if entry is None:
+            raise InventoryError("binding migration decision references an unknown topic")
+        identity = entry.get("identity")
+        if not isinstance(identity, dict):
+            raise InventoryError("binding migration plan identity is malformed")
+        if raw_decision.get("action") != "EXCLUDE_DELETED_TOPIC":
+            raise InventoryError("binding migration decision action is unsupported")
+        if raw_decision.get("binding_id") != entry.get("binding_id"):
+            raise InventoryError("binding migration decision binding identity mismatch")
+        if raw_decision.get("thread_id") != identity.get("thread_id"):
+            raise InventoryError("binding migration decision thread identity mismatch")
+        if raw_decision.get("topic_name") != identity.get("topic_name"):
+            raise InventoryError("binding migration decision topic identity mismatch")
+        reason = _string(raw_decision.get("reason"))
+        if reason is None:
+            raise InventoryError("binding migration decision reason is missing")
+        entry["status"] = "EXCLUDED"
+        entry["desired"] = None
+        entry["blockers"] = []
+        entry["exclusion"] = {
+            "action": "EXCLUDE_DELETED_TOPIC",
+            "reason": reason,
+            "approved_by_role": "owner",
+            "approved_at": approved_at,
+            "decisions_digest": supplied_digest,
+        }
+    return supplied_digest

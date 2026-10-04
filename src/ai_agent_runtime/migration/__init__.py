@@ -1,6 +1,9 @@
 """Reversible migration inventory and comparison tooling."""
 
-from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
+from ai_agent_runtime.migration.binding_plan import (
+    build_binding_migration_plan,
+    read_binding_migration_decisions,
+)
 from ai_agent_runtime.migration.inventory import (
     build_inventory,
     compare_inventories,
@@ -19,6 +22,7 @@ __all__ = [
     "build_rollback_manifest",
     "build_session_storage_manifest",
     "compare_inventories",
+    "read_binding_migration_decisions",
     "read_inventory",
     "verify_rollback_manifest",
     "write_inventory",

@@ -26,6 +26,7 @@ from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.migration.binding_plan import (
     build_binding_migration_plan,
+    read_binding_migration_decisions,
     read_binding_migration_plan,
 )
 from ai_agent_runtime.migration.inventory import (
@@ -122,10 +123,21 @@ def _inventory_compare(*, baseline: str, candidate: str, output: str | None) -> 
     return 0 if report["accepted"] else 1
 
 
-def _inventory_plan_bindings(*, inventory: str, generation_id: str, output: str) -> int:
+def _inventory_plan_bindings(
+    *,
+    inventory: str,
+    generation_id: str,
+    output: str,
+    decisions: str | None,
+) -> int:
     plan = build_binding_migration_plan(
         read_inventory(Path(inventory).expanduser()),
         generation_id=generation_id,
+        decisions=(
+            read_binding_migration_decisions(Path(decisions).expanduser())
+            if decisions
+            else None
+        ),
     )
     target = Path(output).expanduser()
     write_json_artifact(target, plan)
@@ -500,6 +512,7 @@ def main() -> None:
     inventory_plan = inventory_commands.add_parser("plan-bindings")
     inventory_plan.add_argument("--inventory", required=True)
     inventory_plan.add_argument("--generation-id", required=True)
+    inventory_plan.add_argument("--decisions")
     inventory_plan.add_argument("--output", required=True)
     provenance_plan = inventory_commands.add_parser("plan-session-provenance")
     provenance_plan.add_argument("--inventory", required=True)
@@ -715,6 +728,7 @@ def main() -> None:
                         inventory=namespace.inventory,
                         generation_id=namespace.generation_id,
                         output=namespace.output,
+                        decisions=namespace.decisions,
                     )
                 )
             if namespace.inventory_command == "plan-session-provenance":

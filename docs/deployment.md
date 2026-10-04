@@ -197,6 +197,27 @@ ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory plan-binding
   --output /var/lib/ai-agent-runtime/migration/binding-plan.json
 ```
 
+Topics that have already been deleted from the Telegram forum are not silently
+dropped. First retain the blocked base plan for review. An owner may then provide a
+digest-protected `ai-agent-runtime.binding-migration-decisions.v1` artifact bound to
+that exact inventory and base-plan digest. Each decision must identify the exact
+source ref, binding ID, thread ID and topic name, and use
+`EXCLUDE_DELETED_TOPIC` with a recorded reason and approval timestamp. Rebuild the
+plan with:
+
+```bash
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory plan-bindings \
+  --inventory /var/lib/ai-agent-runtime/migration/pre-cutover.json \
+  --generation-id migration-2026-10-03 \
+  --decisions /var/lib/ai-agent-runtime/migration/owner-decisions.json \
+  --output /var/lib/ai-agent-runtime/migration/binding-plan-resolved.json
+```
+
+The resolved rows are marked `EXCLUDED`, carry the decision digest, and do not
+create Runtime Bindings. This is a migration exclusion, not destructive cleanup of
+legacy files. Legacy `topic_config.json` and CUS artifacts remain available for
+rollback until the control period ends.
+
 The plan is evidence, not an apply command. Import it into CUS with the separately
 versioned `cus-runtime-migration-import` tool. Run that tool without `--commit` first;
 only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends one
