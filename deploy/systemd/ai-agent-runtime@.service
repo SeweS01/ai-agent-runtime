@@ -13,7 +13,10 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=restart
 UMask=0077
 NoNewPrivileges=true
-PrivateTmp=true
+# Runtime must verify exact wrapper cwd/executable through /proc.  A private
+# /tmp mount makes cross-namespace /proc symlinks unreadable on the production
+# kernel.  tmux isolation is provided by the per-AgentInstance TMUX_TMPDIR.
+PrivateTmp=false
 
 [Install]
 WantedBy=default.target

@@ -116,7 +116,12 @@ produce real staging evidence before a staging instance can exist.
 Each `agent_instances` entry identifies its Runtime config, exact Telegram checkout,
 instance-named wrapper, forum chat and one-way working-bot token fingerprint. It also
 contains captured effective Runtime service properties (`Type=notify`,
-`Restart=always`, 2-second restart, 30-second watchdog, private modes, `Accept=false`)
+`Restart=always`, 2-second restart, 30-second watchdog, `PrivateTmp=false`,
+`Accept=false`). `PrivateTmp=false` is an execution invariant rather than a relaxed
+default: Runtime verifies the exact wrapper cwd and executable through `/proc`, and
+the target kernel denies those cross-namespace symlinks from a private `/tmp` mount.
+Each AgentInstance instead uses a mode-0700 `TMUX_TMPDIR` below its user runtime
+directory, so tmux socket isolation does not depend on a private `/tmp` namespace.
 and Telegram service properties (`KillMode=process`, exact wrapper path, Codex
 autoupdate disabled). The audit re-hashes the real Codex binary, reads the pinned Git
 HEAD, verifies the complete qualification manifest, checks namespace/path/forum/bot
