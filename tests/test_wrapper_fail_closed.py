@@ -28,7 +28,9 @@ def test_phase_b_response_deadline_exceeds_daemon_verification_window(
         payload: dict[str, object],
         *,
         response_timeout: float,
+        peer_authorizer: object,
     ) -> dict[str, object]:
+        assert peer_authorizer is wrapper_main._authorize_runtime_peer
         observed.append((str(payload["action"]), response_timeout))
         return {"ok": True}
 

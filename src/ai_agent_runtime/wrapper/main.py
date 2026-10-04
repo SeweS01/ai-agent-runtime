@@ -30,6 +30,7 @@ from ai_agent_runtime.providers.codex.argv import (
 )
 
 _PR_SET_PDEATHSIG = 1
+_PR_SET_PTRACER = 0x59616D61
 _HEARTBEAT_INTERVAL_SECONDS = 2.0
 _HEARTBEAT_REQUEST_TIMEOUT_SECONDS = 2.0
 _PHASE_B_RESPONSE_TIMEOUT_SECONDS = 60.0
@@ -124,6 +125,17 @@ def _child_setup(expected_parent_pid: int) -> None:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
+def _authorize_runtime_peer(pid: int, uid: int, _gid: int) -> None:
+    """Permit only the verified local Runtime peer to inspect this wrapper in /proc."""
+
+    if uid != os.getuid() or pid <= 0:
+        raise PermissionError("Runtime Unix peer identity mismatch")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PTRACER, pid, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
 def _call_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> dict[str, Any]:
     response_timeout = (
         _PHASE_B_RESPONSE_TIMEOUT_SECONDS if payload.get("action") == "verify_started" else 10.0
@@ -134,6 +146,7 @@ def _call_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> dict[str, A
                 config.socket_path,
                 payload,
                 response_timeout=response_timeout,
+                peer_authorizer=_authorize_runtime_peer,
             )
         )
     except (TimeoutError, OSError, EOFError, ValueError) as exc:
@@ -150,7 +163,14 @@ def _notify_runtime(config: RuntimeConfig, payload: dict[str, Any]) -> None:
     """Best-effort terminal notification; child exit status remains authoritative."""
 
     async def notify() -> None:
-        await asyncio.wait_for(request(config.socket_path, payload), timeout=2.0)
+        await asyncio.wait_for(
+            request(
+                config.socket_path,
+                payload,
+                peer_authorizer=_authorize_runtime_peer,
+            ),
+            timeout=2.0,
+        )
 
     with contextlib.suppress(TimeoutError, OSError, EOFError, ValueError):
         asyncio.run(notify())
@@ -164,7 +184,11 @@ def _try_runtime_request(
 
     async def notify() -> dict[str, Any]:
         return await asyncio.wait_for(
-            request(config.socket_path, payload),
+            request(
+                config.socket_path,
+                payload,
+                peer_authorizer=_authorize_runtime_peer,
+            ),
             timeout=_HEARTBEAT_REQUEST_TIMEOUT_SECONDS,
         )
 

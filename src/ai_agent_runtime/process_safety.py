@@ -61,11 +61,7 @@ class TmuxPaneProcess:
     session_id: str = ""
 
 
-def _tmux_socket_from_environment(value: str) -> Path:
-    socket_value, separator, _remainder = value.partition(",")
-    if not separator or not socket_value:
-        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "malformed TMUX environment")
-    socket_path = Path(socket_value)
+def _validate_tmux_socket(socket_path: Path) -> Path:
     if not socket_path.is_absolute() or ".." in socket_path.parts:
         raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "unsafe tmux socket path")
     metadata = socket_path.stat()
@@ -77,6 +73,32 @@ def _tmux_socket_from_environment(value: str) -> Path:
     if parent.st_mode & stat.S_IWOTH:
         raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "tmux socket directory is world writable")
     return socket_path
+
+
+def _tmux_socket_from_environment(value: str) -> Path:
+    socket_value, separator, _remainder = value.partition(",")
+    if not separator or not socket_value:
+        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "malformed TMUX environment")
+    return _validate_tmux_socket(Path(socket_value))
+
+
+def _tmux_socket_for_wrapper(environment: dict[str, str], *, uid: int) -> Path:
+    tmux_value = environment.get("TMUX")
+    if tmux_value:
+        return _tmux_socket_from_environment(tmux_value)
+    tmux_tmpdir = environment.get("TMUX_TMPDIR")
+    if not tmux_tmpdir:
+        raise RuntimeFailureError(
+            ErrorCode.AMBIGUOUS,
+            "wrapper has neither TMUX nor qualified TMUX_TMPDIR environment",
+        )
+    base = Path(tmux_tmpdir)
+    if not base.is_absolute() or ".." in base.parts:
+        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "unsafe TMUX_TMPDIR")
+    base_metadata = base.stat()
+    if base_metadata.st_uid != uid or base_metadata.st_mode & stat.S_IWOTH:
+        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "unsafe TMUX_TMPDIR ownership/mode")
+    return _validate_tmux_socket(base / f"tmux-{uid}" / "default")
 
 
 def inspect_tmux_pane(socket_path: Path, pane_id: str) -> TmuxPaneProcess:
@@ -132,12 +154,12 @@ def verify_wrapper_identity(identity: WrapperIdentity) -> None:
     if actual_cwd != Path(identity.cwd).resolve(strict=True):
         raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "wrapper process cwd mismatch")
     environment = proc_environment(identity.pid)
-    if environment.get("TMUX_PANE") != identity.tmux_pane:
+    reported_pane = environment.get("TMUX_PANE")
+    if reported_pane is not None and reported_pane != identity.tmux_pane:
         raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "wrapper TMUX_PANE mismatch")
-    tmux_value = environment.get("TMUX")
-    if not tmux_value:
-        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "wrapper has no TMUX environment")
-    pane = inspect_tmux_pane(_tmux_socket_from_environment(tmux_value), identity.tmux_pane)
+    pane = inspect_tmux_pane(
+        _tmux_socket_for_wrapper(environment, uid=identity.uid), identity.tmux_pane
+    )
     if pane.session_name != identity.tmux_session or pane.pane_pid != identity.pid:
         raise RuntimeFailureError(
             ErrorCode.AMBIGUOUS,
@@ -150,10 +172,7 @@ def retire_tmux_session(identity: WrapperIdentity) -> None:
 
     verify_wrapper_identity(identity)
     environment = proc_environment(identity.pid)
-    tmux_value = environment.get("TMUX")
-    if not tmux_value:
-        raise RuntimeFailureError(ErrorCode.AMBIGUOUS, "wrapper has no TMUX environment")
-    socket_path = _tmux_socket_from_environment(tmux_value)
+    socket_path = _tmux_socket_for_wrapper(environment, uid=identity.uid)
     pane = inspect_tmux_pane(socket_path, identity.tmux_pane)
     if (
         pane.pane_id != identity.tmux_pane

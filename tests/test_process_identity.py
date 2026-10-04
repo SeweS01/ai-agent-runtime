@@ -75,6 +75,39 @@ def test_wrapper_identity_rejects_tmux_process_mismatch(
     assert failure.value.code is ErrorCode.AMBIGUOUS
 
 
+def test_wrapper_identity_accepts_sanitized_tmux_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    socket_dir = tmp_path / f"tmux-{os.getuid()}"
+    socket_dir.mkdir()
+    socket_path = socket_dir / "default"
+    socket_path.touch()
+    tmp_path.chmod(0o700)
+    socket_dir.chmod(0o700)
+    monkeypatch.setattr(process_safety, "proc_uid", lambda _pid: os.getuid())
+    monkeypatch.setattr(process_safety, "proc_starttime", lambda _pid: 123)
+    monkeypatch.setattr(
+        process_safety,
+        "proc_environment",
+        lambda _pid: {"TMUX_TMPDIR": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        process_safety,
+        "_validate_tmux_socket",
+        lambda path: path,
+    )
+    observed: list[Path] = []
+
+    def inspect(path: Path, _pane: str) -> TmuxPaneProcess:
+        observed.append(path)
+        return TmuxPaneProcess("%7", "cc-n1001-42", os.getpid())
+
+    monkeypatch.setattr(process_safety, "inspect_tmux_pane", inspect)
+    verify_wrapper_identity(_identity())
+    assert observed == [socket_path]
+
+
 def test_process_executable_evidence_is_digest_bound() -> None:
     evidence = process_executable_evidence(os.getpid())
     assert evidence["inode"] > 0
