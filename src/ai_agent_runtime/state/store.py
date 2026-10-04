@@ -1025,7 +1025,12 @@ class RuntimeStore:
         rollout_device: int,
         rollout_inode: int,
     ) -> None:
-        encoded = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+        normalized_evidence = dict(evidence)
+        normalized_evidence.setdefault("spec_digest", spec.spec_digest)
+        normalized_evidence.setdefault("account_profile", spec.account_profile)
+        normalized_evidence.setdefault("actual_model", spec.model)
+        normalized_evidence.setdefault("actual_reasoning_effort", spec.reasoning_effort)
+        encoded = json.dumps(normalized_evidence, sort_keys=True, separators=(",", ":"))
         with self._connection:
             existing = self.session_owner(session_id)
             expected_owner = (binding_id, account_profile)
@@ -1124,6 +1129,8 @@ class RuntimeStore:
                     rollout_inode=int(evidence["rollout_inode"]),
                     session_id=str(evidence["session_id"]),
                     codex_version=str(evidence["real_codex_version"]),
+                    applied_model=str(evidence["actual_model"]),
+                    applied_reasoning_effort=str(evidence["actual_reasoning_effort"]),
                 )
             )
         return tuple(targets)

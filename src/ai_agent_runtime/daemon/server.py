@@ -1509,8 +1509,8 @@ class RuntimeServer:
                 active_turn_id = None
 
         sequence = cursor.observation_sequence
-        last_model = cursor.last_model
-        last_effort = cursor.last_reasoning_effort
+        last_model = cursor.last_model or target.applied_model
+        last_effort = cursor.last_reasoning_effort or target.applied_reasoning_effort
         if (
             scanned.at_eof
             and pending_model is not None

@@ -216,6 +216,8 @@ class RolloutObservationTarget:
     rollout_inode: int
     session_id: str
     codex_version: str
+    applied_model: str
+    applied_reasoning_effort: str
 
 
 @dataclass(frozen=True, slots=True)

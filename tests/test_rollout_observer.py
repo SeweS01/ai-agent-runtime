@@ -184,3 +184,46 @@ def test_incomplete_turn_is_busy_and_unstructured_text_is_not_evidence(tmp_path:
     daemon._observe_codex_rollout(daemon.store.rollout_observation_targets()[0])
     assert daemon.store.rollout_observation_targets()[0].lifecycle == "BUSY"
     assert daemon.store.summary()["outbox_pending"] == 0
+
+
+def test_delayed_applied_context_cannot_overwrite_newer_desired_revision(tmp_path: Path) -> None:
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.touch(mode=0o600)
+    daemon = _daemon_with_applied_rollout(tmp_path, rollout=rollout)
+    project = tmp_path / "project"
+    newer = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(project),
+        provider="codex",
+        account_profile="work",
+        model="gpt-cus-new",
+        reasoning_effort="high",
+        generation_id="gen-1",
+        revision=2,
+    )
+    daemon.store.put_effective_spec(
+        newer,
+        codex_home=tmp_path / "profiles" / "work",
+        profile_fingerprint="fp",
+    )
+    _append(
+        rollout,
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
+    )
+    _append(
+        rollout,
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "t1", "model": "gpt-old", "effort": "medium"},
+        },
+    )
+    _append(
+        rollout,
+        {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t1"}},
+    )
+
+    daemon._observe_codex_rollout(daemon.store.rollout_observation_targets()[0])
+
+    assert daemon.store.summary()["outbox_pending"] == 0
