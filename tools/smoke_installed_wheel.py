@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a built wheel side-by-side and execute both packaged entrypoints."""
+"""Install a built wheel side-by-side and execute every packaged entrypoint."""
 
 from __future__ import annotations
 
@@ -47,6 +47,18 @@ def main() -> int:
         ).stdout.strip()
         if not version.startswith("codex-wrapper "):
             raise RuntimeError("installed wrapper returned an unexpected version response")
+        qualification_entrypoints = (
+            runtime.parent / "ai-agent-runtime-qualify-upstream",
+            runtime.parent / "ai-agent-runtime-qualify-retirement",
+        )
+        for entrypoint in qualification_entrypoints:
+            subprocess.run(
+                (str(entrypoint), "--help"),
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                timeout=30,
+            )
         if (runtime.parents[1] / ".installing").exists():
             raise RuntimeError("installed release retained its incomplete marker")
         print(
@@ -56,6 +68,9 @@ def main() -> int:
                     "wheel_sha256": report["wheel_sha256"],
                     "runtime_entrypoint": True,
                     "wrapper_version": version,
+                    "qualification_entrypoints": [
+                        entrypoint.name for entrypoint in qualification_entrypoints
+                    ],
                     "activation_performed": report["activation_performed"],
                 },
                 sort_keys=True,

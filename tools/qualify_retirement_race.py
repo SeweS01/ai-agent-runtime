@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import types
@@ -44,6 +45,46 @@ WINDOWS = (
     "turn_complete_before_runtime_idle",
     "two_simultaneous_messages",
 )
+
+_CHILD_MARKER = "AI_AGENT_RUNTIME_RETIREMENT_HARNESS_CHILD"
+_SAFE_ENV_KEYS = ("HOME", "LANG", "LC_ALL", "PATH", "TERM", "TZ")
+
+
+def _runtime_python_paths() -> tuple[Path, ...]:
+    """Return only the checked-out or installed Runtime import roots."""
+
+    module = Path(__file__).resolve()
+    root = module.parents[1]
+    source = root / "src"
+    if (source / "ai_agent_runtime").is_dir():
+        return (root, source)
+    return (root,)
+
+
+def _run_with_upstream_environment(upstream: Path, argv: list[str]) -> int | None:
+    """Re-exec once in pinned upstream's venv without forwarding secret env vars."""
+
+    if os.environ.get(_CHILD_MARKER) == "1":
+        return None
+    python = upstream / ".venv" / "bin" / "python"
+    if not python.exists() or not os.access(python, os.X_OK):
+        raise SystemExit(f"pinned upstream Python is unavailable: {python}")
+    environment = {
+        key: os.environ[key]
+        for key in _SAFE_ENV_KEYS
+        if os.environ.get(key)
+    }
+    environment[_CHILD_MARKER] = "1"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        str(path) for path in _runtime_python_paths()
+    )
+    completed = subprocess.run(
+        [str(python), "-m", "tools.qualify_retirement_race", *argv],
+        check=False,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+    )
+    return completed.returncode
 
 
 @dataclass
@@ -388,6 +429,10 @@ def main() -> int:
     parser.add_argument("--environment", choices=("local", "staging"), default="local")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    upstream_root = Path(args.upstream).expanduser().resolve(strict=True)
+    child_result = _run_with_upstream_environment(upstream_root, sys.argv[1:])
+    if child_result is not None:
+        return child_result
     evidence = asyncio.run(run(args))
     print(json.dumps(evidence, indent=2, sort_keys=True))
     return 0 if evidence["status"] == "PASS" else 1

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,11 +14,54 @@ from ai_agent_runtime.qualification.release_gate import (
     QUALIFICATION_GATES,
     release_tuple_digest,
 )
+from tools import qualify_retirement_race as retirement_harness
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM_ROOT = RUNTIME_ROOT.parent / "telegram-ai-agent-upstream-validation"
 UPSTREAM_PYTHON = UPSTREAM_ROOT / ".venv/bin/python"
 UPSTREAM_SHA = "0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b"
+
+
+def test_retirement_entrypoint_reexecs_with_sanitized_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upstream = tmp_path / "upstream"
+    python = upstream / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    captured: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        captured["stdin"] = kwargs["stdin"]
+        return subprocess.CompletedProcess(argv, 23)
+
+    monkeypatch.delenv(retirement_harness._CHILD_MARKER, raising=False)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "must-not-cross-boundary")
+    monkeypatch.setattr(retirement_harness.subprocess, "run", fake_run)
+
+    result = retirement_harness._run_with_upstream_environment(
+        upstream,
+        ["--upstream", str(upstream)],
+    )
+
+    assert result == 23
+    assert captured["argv"] == [
+        str(python),
+        "-m",
+        "tools.qualify_retirement_race",
+        "--upstream",
+        str(upstream),
+    ]
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment[retirement_harness._CHILD_MARKER] == "1"
+    assert "TELEGRAM_BOT_TOKEN" not in environment
+    assert environment["PYTHONPATH"] == os.pathsep.join(
+        str(path) for path in retirement_harness._runtime_python_paths()
+    )
+    assert captured["stdin"] is subprocess.DEVNULL
 
 
 @pytest.mark.skipif(

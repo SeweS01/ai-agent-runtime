@@ -79,10 +79,13 @@ default; `retirement_enabled = true` is invalid without a non-empty
 `retirement_qualification_report_id`. That identifier is an audit reference, not a
 substitute for the evidence required above.
 
-The source-level baseline checks can be run against a clean checkout:
+The source-level baseline checks are installed from the same digest-bound Runtime
+wheel as the daemon and wrapper. Run the installed release entrypoint against a
+clean upstream checkout:
 
 ```bash
-uv run python tools/qualify_telegram_upstream.py /path/to/telegram-ai-agent \
+/home/devops/.local/lib/ai-agent-runtime/releases/<release-id>/bin/ai-agent-runtime-qualify-upstream \
+  /path/to/telegram-ai-agent \
   --release-tuple /srv/qualification/release-tuple.json \
   --report-id staging-2026-10-04-001 \
   --environment staging \
@@ -101,8 +104,7 @@ path, injects external tmux disappearance in all six required windows, and recor
 per-prompt submission and explicit-alert evidence:
 
 ```bash
-/path/to/telegram-ai-agent/.venv/bin/python \
-  tools/qualify_retirement_race.py \
+/home/devops/.local/lib/ai-agent-runtime/releases/<release-id>/bin/ai-agent-runtime-qualify-retirement \
   --upstream /path/to/telegram-ai-agent \
   --release-tuple /srv/qualification/release-tuple.json \
   --report-id staging-2026-10-04-001 \
@@ -110,11 +112,15 @@ per-prompt submission and explicit-alert evidence:
   --output /srv/qualification/evidence/retirement-race.json
 ```
 
-The harness uses deterministic tmux I/O test doubles but real pinned upstream
-control-flow. An upstream alert callback is evidence of an explicit-not-delivered
-outcome; actual Telegram delivery remains covered by the separate `telegram_e2e`
-gate. A locally produced artifact remains `environment=local` and cannot satisfy the
-release verifier.
+The installed retirement entrypoint re-executes itself once through the pinned
+upstream checkout's `.venv/bin/python`, while exposing only the installed Runtime
+package path and a small allowlist of non-secret environment variables. This keeps
+upstream dependencies pinned without adding Telegram packages to the Runtime daemon
+environment. The harness uses deterministic tmux I/O test doubles but real pinned
+upstream control-flow. An upstream alert callback is evidence of an
+explicit-not-delivered outcome; actual Telegram delivery remains covered by the
+separate `telegram_e2e` gate. A locally produced artifact remains
+`environment=local` and cannot satisfy the release verifier.
 
 ## Session-storage topology manifest
 
