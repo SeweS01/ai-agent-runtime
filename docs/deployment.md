@@ -25,7 +25,9 @@ upstream release tuple, staging evidence, and rollback manifest must be validate
 The production Telegram Agent drop-in must retain `KillMode=process` so its restart
 does not recursively destroy qualified tmux/wrapper/Codex processes.
 
-Build a wheel in CI, record its SHA-256 in the release record, and install it into a
+CI builds the wheel from the checked-out source and publishes it as the
+`ai-agent-runtime-wheel` workflow artifact. Record that exact file's SHA-256 in the
+release record, and install it into a
 new side-by-side directory. The installer refuses symlinked or tampered wheels,
 unexpected digests, unsafe release roots, and any existing release ID. It never
 changes an active symlink, restarts a service, or removes an older release:
