@@ -432,6 +432,8 @@ def run(argv: list[str]) -> int:
     invocation = parse_invocation(argv)
     if invocation.kind is InvocationKind.DENIED_ADMIN:
         _fail("DENIED_ADMIN", "credential and update commands are not exposed by wrapper")
+    if invocation.kind is InvocationKind.RESUME and invocation.resume_session_id is None:
+        _fail(ErrorCode.INVALID_REQUEST.value, "resume requires one explicit Codex session ID")
     if invocation.kind is InvocationKind.SAFE_LOCAL:
         if argv[0] in {"--version", "-V"}:
             print(f"codex-wrapper {__version__}")
