@@ -133,8 +133,12 @@ default: Runtime verifies the exact wrapper cwd and executable through `/proc`, 
 the target kernel denies those cross-namespace symlinks from a private `/tmp` mount.
 Each AgentInstance instead uses a mode-0700 `TMUX_TMPDIR` below its user runtime
 directory, so tmux socket isolation does not depend on a private `/tmp` namespace.
-and Telegram service properties (`KillMode=process`, exact wrapper path, Codex
-autoupdate disabled). The audit re-hashes the real Codex binary, reads the pinned Git
+The Runtime service unit must set `RuntimeDirectoryPreserve=yes`, because a
+full `systemctl stop` must not remove `TMUX_TMPDIR` while an upstream-owned tmux
+server and Codex child remain alive. `restart` alone is insufficient: systemd
+preserves the directory for restarts but removes it on an ordinary stop.
+The manifest also captures Telegram service properties (`KillMode=process`,
+exact wrapper path, Codex autoupdate disabled). The audit re-hashes the real Codex binary, reads the pinned Git
 HEAD, verifies the complete qualification manifest, checks namespace/path/forum/bot
 uniqueness, and performs no mutations. `READY_FOR_STAGING` explicitly does not
 authorize production cutover.

@@ -127,6 +127,7 @@ retirement_qualification_report_id = ""
             "restart_sec_seconds": 2,
             "watchdog_sec_seconds": 30,
             "runtime_directory_mode": "0700",
+            "runtime_directory_preserve": "yes",
             "umask": "0077",
             "socket_mode": "0600",
             "socket_accept": False,
@@ -296,6 +297,30 @@ def test_deployment_audit_blocks_duplicate_forum_and_unsafe_systemd(tmp_path: Pa
     assert report["status"] == "BLOCKED"
     assert "deployment_forum_chat_id_not_unique" in report["errors"]
     assert "agent-2:telegram_service:kill_mode_mismatch" in report["errors"]
+
+
+def test_deployment_audit_requires_tmux_socket_survival_across_full_stop(
+    tmp_path: Path,
+) -> None:
+    instance = _instance(tmp_path)
+    instance["runtime_service"]["runtime_directory_preserve"] = "restart"
+    path = _manifest(tmp_path, [instance])
+    report = audit_deployment_manifest(
+        path,
+        qualification_verifier=_verifier_for,
+        rollback_verifier=_rollback_verified,
+        git_head_reader=lambda _path: "0" * 40,
+    )
+    assert report["accepted"] is False
+    assert "agent-1:runtime_service:runtime_directory_preserve_mismatch" in report["errors"]
+
+
+def test_runtime_unit_preserves_tmux_socket_on_full_stop() -> None:
+    unit = (
+        Path(__file__).resolve().parents[1]
+        / "deploy/systemd/ai-agent-runtime@.service"
+    ).read_text(encoding="utf-8")
+    assert "RuntimeDirectoryPreserve=yes" in unit
 
 
 def test_deployment_audit_blocks_unqualified_release(tmp_path: Path) -> None:

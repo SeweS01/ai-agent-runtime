@@ -130,6 +130,7 @@ def _check_service_properties(
         "restart_sec_seconds": 2,
         "watchdog_sec_seconds": 30,
         "runtime_directory_mode": "0700",
+        "runtime_directory_preserve": "yes",
         "umask": "0077",
         "socket_mode": "0600",
         "socket_accept": False,

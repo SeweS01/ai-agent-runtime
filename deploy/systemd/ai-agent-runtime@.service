@@ -10,7 +10,9 @@ RestartSec=2s
 WatchdogSec=30s
 RuntimeDirectory=ai-agent-runtime/%i
 RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=restart
+# tmux sockets live below TMUX_TMPDIR in this directory. A full daemon stop
+# must not unlink the socket while the Telegram Agent and Codex are still live.
+RuntimeDirectoryPreserve=yes
 UMask=0077
 NoNewPrivileges=true
 # Runtime must verify exact wrapper cwd/executable through /proc.  A private
