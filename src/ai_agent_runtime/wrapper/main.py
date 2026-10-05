@@ -298,6 +298,16 @@ def _terminate_group(child: subprocess.Popen[bytes], *, timeout: float = 10.0) -
         child.wait()
 
 
+def _set_tty_foreground_group(pgid: int) -> None:
+    """Hand the pane's terminal to a process group without stopping the caller."""
+
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+    try:
+        os.tcsetpgrp(0, pgid)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
 def _run_supervised(
     binary: str,
     argv: list[str],
@@ -316,6 +326,16 @@ def _run_supervised(
         preexec_fn=functools.partial(_child_setup, wrapper_pid),
     )
     child_starttime = proc_starttime(child.pid)
+    if child.poll() is None:
+        try:
+            # The child has its own process group for bounded termination. It
+            # must also own the pane's foreground terminal group to receive
+            # input. Continue it if an early read stopped it with SIGTTIN.
+            _set_tty_foreground_group(child.pid)
+            os.killpg(child.pid, signal.SIGCONT)
+        except (OSError, ValueError):
+            _terminate_group(child)
+            raise
     terminate_requested = False
     heartbeat_stop: threading.Event | None = None
     heartbeat_thread: threading.Thread | None = None
@@ -379,6 +399,8 @@ def _run_supervised(
             time.sleep(0.1)
         return int(child.returncode or 0)
     finally:
+        with contextlib.suppress(OSError, ValueError):
+            _set_tty_foreground_group(wrapper_pid)
         if heartbeat_stop is not None:
             heartbeat_stop.set()
         if heartbeat_thread is not None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -96,3 +98,83 @@ time.sleep(60)
     if _process_running(child_pid):
         os.kill(child_pid, signal.SIGKILL)
     assert not _process_running(child_pid)
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
+def test_supervised_child_receives_tmux_keyboard_input(tmp_path: Path) -> None:
+    socket_path = tmp_path / "tmux.sock"
+    script = """
+import functools
+import os
+import signal
+import subprocess
+import sys
+
+from ai_agent_runtime.wrapper.main import _child_setup, _set_tty_foreground_group
+
+child_code = "print('INPUT_READY', flush=True); print('RECEIVED:' + input(), flush=True)"
+child = subprocess.Popen(
+    [sys.executable, "-c", child_code],
+    preexec_fn=functools.partial(_child_setup, os.getpid()),
+)
+_set_tty_foreground_group(child.pid)
+os.killpg(child.pid, signal.SIGCONT)
+child.wait(timeout=10)
+_set_tty_foreground_group(os.getpgrp())
+"""
+    command = ["tmux", "-S", str(socket_path)]
+    subprocess.run(
+        [*command, "new-session", "-d", "-s", "wrapper-tty", "sleep 30"],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        subprocess.run(
+            [*command, "set-window-option", "-t", "=wrapper-tty:0", "remain-on-exit", "on"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                *command,
+                "respawn-pane",
+                "-k",
+                "-t",
+                "=wrapper-tty:0",
+                shlex.join([sys.executable, "-c", script]),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            pane = subprocess.run(
+                [*command, "capture-pane", "-pt", "=wrapper-tty:"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            if "INPUT_READY" in pane:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("child never reached its input prompt")
+        subprocess.run(
+            [*command, "send-keys", "-t", "=wrapper-tty:", "hello", "Enter"],
+            check=True,
+            capture_output=True,
+        )
+        while time.monotonic() < deadline:
+            pane = subprocess.run(
+                [*command, "capture-pane", "-pt", "=wrapper-tty:"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            if "RECEIVED:hello" in pane:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"child did not receive tmux input: {pane!r}")
+    finally:
+        subprocess.run([*command, "kill-server"], check=False, capture_output=True)
