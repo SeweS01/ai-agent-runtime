@@ -365,14 +365,24 @@ class RuntimeServer:
         wrapper_executable = process_executable_evidence(identity.pid)
         config_snapshot = read_topic_config(self.config.topic_config_path)
         bindings = self.store.list_bindings(self.config.agent_instance_id)
+        resume_session_id = payload.get("resume_session_id")
+        if resume_session_id is not None and (
+            not isinstance(resume_session_id, str) or not resume_session_id
+        ):
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "invalid resume session id")
         try:
             binding = phase_a_correlate(
                 identity=identity,
                 bindings=bindings,
                 topic_config=config_snapshot,
+                resume_session_id=resume_session_id,
             )
         except RuntimeFailureError as exc:
-            candidates = phase_a_identity_candidates(identity=identity, bindings=bindings)
+            candidates = phase_a_identity_candidates(
+                identity=identity,
+                bindings=bindings,
+                resume_session_id=resume_session_id,
+            )
             if exc.code is ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS and len(candidates) == 1:
                 self.store.enqueue_user_notification(
                     code=UserNotificationCode.UNSUPPORTED_CODEX_SUBPROCESS,
@@ -397,10 +407,7 @@ class RuntimeServer:
             raise RuntimeFailureError(
                 ErrorCode.UNKNOWN_BINDING, "effective spec namespace mismatch"
             )
-        resume_session_id = payload.get("resume_session_id")
         if resume_session_id is not None:
-            if not isinstance(resume_session_id, str) or not resume_session_id:
-                raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "invalid resume session id")
             owner = self.store.session_owner(resume_session_id)
             if owner != (binding.binding_id, spec.account_profile):
                 self.store.enqueue_user_notification(

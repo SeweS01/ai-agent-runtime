@@ -7,6 +7,7 @@ from pathlib import Path
 from ai_agent_runtime.domain import RuntimeBinding, WrapperIdentity
 from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 
+from .adapter import matches_managed_tmux_name
 from .tmux_state import UpstreamTmuxState
 from .topic_config import TopicConfigSnapshot
 
@@ -15,11 +16,16 @@ def phase_a_identity_candidates(
     *,
     identity: WrapperIdentity,
     bindings: tuple[RuntimeBinding, ...],
+    resume_session_id: str | None = None,
 ) -> tuple[RuntimeBinding, ...]:
     return tuple(
         binding
         for binding in bindings
-        if binding.expected_tmux_session == identity.tmux_session
+        if matches_managed_tmux_name(
+            expected=binding.expected_tmux_session,
+            observed=identity.tmux_session,
+            resume_requested=resume_session_id is not None,
+        )
         and Path(binding.canonical_cwd).resolve() == Path(identity.cwd).resolve()
     )
 
@@ -29,8 +35,13 @@ def phase_a_correlate(
     identity: WrapperIdentity,
     bindings: tuple[RuntimeBinding, ...],
     topic_config: TopicConfigSnapshot,
+    resume_session_id: str | None = None,
 ) -> RuntimeBinding:
-    candidates = phase_a_identity_candidates(identity=identity, bindings=bindings)
+    candidates = phase_a_identity_candidates(
+        identity=identity,
+        bindings=bindings,
+        resume_session_id=resume_session_id,
+    )
     if not candidates:
         raise RuntimeFailureError(
             ErrorCode.UNKNOWN_BINDING, "no binding matches tmux identity and cwd"

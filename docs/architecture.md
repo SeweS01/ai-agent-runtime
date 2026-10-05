@@ -12,7 +12,10 @@ state.
    socket. It never contacts CUS.
 3. Runtime performs Phase A against a fresh `topic_config.json` read, an exact
    version-qualified tmux session name, canonical cwd, and the AgentInstance
-   namespace.
+   namespace. A live `/resume` may use the pinned upstream's temporary
+   `-switch-<hex time_ns>` suffix, but only when the wrapper supplies a resume
+   session ID and Runtime proves that session belongs to the same binding and
+   account.
 4. Runtime returns only a previously verified local effective spec. Unknown,
    ambiguous, unmanaged, drifted, and Codex-subprocess launches are denied.
 5. Wrapper starts the real Codex as a supervised process group with an isolated

@@ -5,7 +5,10 @@ import pytest
 
 from ai_agent_runtime.domain import RuntimeBinding, WrapperIdentity
 from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
-from ai_agent_runtime.telegram_upstream.adapter import TelegramUpstreamAdapter
+from ai_agent_runtime.telegram_upstream.adapter import (
+    TelegramUpstreamAdapter,
+    matches_managed_tmux_name,
+)
 from ai_agent_runtime.telegram_upstream.correlation import phase_a_correlate, phase_b_verify
 from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
@@ -23,6 +26,67 @@ def test_tmux_name_matches_pinned_upstream_algorithm() -> None:
     adapter = TelegramUpstreamAdapter("0" * 40)
     assert adapter.expected_session_name(chat_id=-100123, thread_id=44) == "cc-n100123-44"
     assert adapter.expected_session_name(chat_id=123, thread_id=None) == "cc-123-0"
+
+
+def test_live_resume_switch_name_requires_resume_and_exact_base() -> None:
+    observed = "cc-n1001-42-switch-18db9e8bb41cdf5b"
+    assert matches_managed_tmux_name(
+        expected="cc-n1001-42", observed=observed, resume_requested=True
+    )
+    assert not matches_managed_tmux_name(
+        expected="cc-n1001-42", observed=observed, resume_requested=False
+    )
+    assert not matches_managed_tmux_name(
+        expected="cc-n1001-43", observed=observed, resume_requested=True
+    )
+    assert not matches_managed_tmux_name(
+        expected="cc-n1001-42",
+        observed="cc-n1001-42-switch-nothex",
+        resume_requested=True,
+    )
+
+
+def test_phase_a_allows_qualified_live_resume_switch_only_with_resume_id(
+    tmp_path: Path,
+) -> None:
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    topic_path = tmp_path / "topic_config.json"
+    _write_json(
+        topic_path,
+        {"topics": {"42": {"cwd": str(cwd), "engine": "codex", "exec_mode": "tmux"}}},
+    )
+    snapshot = read_topic_config(topic_path)
+    binding = RuntimeBinding(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        chat_id=-1001,
+        thread_id=42,
+        project_id="project-1",
+        canonical_cwd=str(cwd),
+        expected_tmux_session="cc-n1001-42",
+        config_digest=snapshot.digest,
+    )
+    identity = WrapperIdentity(
+        pid=1,
+        starttime=2,
+        uid=1000,
+        tmux_session="cc-n1001-42-switch-18db9e8bb41cdf5b",
+        tmux_pane="%1",
+        cwd=str(cwd),
+    )
+    with pytest.raises(RuntimeFailureError) as denied:
+        phase_a_correlate(identity=identity, bindings=(binding,), topic_config=snapshot)
+    assert denied.value.code is ErrorCode.UNKNOWN_BINDING
+    assert (
+        phase_a_correlate(
+            identity=identity,
+            bindings=(binding,),
+            topic_config=snapshot,
+            resume_session_id="owned-session",
+        )
+        == binding
+    )
 
 
 def test_topic_reconcile_never_creates_missing_key_and_preserves_unknown(

@@ -28,6 +28,7 @@ QUALIFICATION_GATES: Final[dict[str, tuple[str, ...]]] = {
     "upstream_source_contract": (
         "exact_commit",
         "tmux_naming",
+        "resume_switch_tmux_naming",
         "spawn_before_state_save",
         "safe_binary_launch",
     ),

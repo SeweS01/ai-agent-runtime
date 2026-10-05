@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Review/qualification baseline from the approved specification. Production may
 # pin a different SHA only after its own golden qualification report.
 VALIDATION_BASELINE_SHA = "0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b"
+
+
+def matches_managed_tmux_name(
+    *, expected: str, observed: str, resume_requested: bool
+) -> bool:
+    """Match the pinned upstream's base or temporary live-/resume name.
+
+    `switch_or_start_session` appends `-switch-{time.time_ns():x}` while the
+    previous pane is alive. This shape is qualified for the pinned upstream
+    SHA; only a provenance-checked resume may use the temporary form.
+    """
+
+    if observed == expected:
+        return True
+    if not resume_requested:
+        return False
+    return re.fullmatch(re.escape(expected) + r"-switch-[0-9a-f]{15,17}", observed) is not None
 
 
 @dataclass(frozen=True, slots=True)

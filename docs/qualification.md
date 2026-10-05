@@ -6,7 +6,7 @@ release, protocol major, CUS connector version, and qualification report.
 
 Required blocking gates include:
 
-- exact upstream tmux naming and Phase A/Phase B ordering;
+- exact upstream base and live-`/resume` switch tmux naming and Phase A/Phase B ordering;
 - real Codex argv, TUI, rollout discovery, `/new`, `/resume`, `/tui`, `/kill`, and
   `/recycle` behavior;
 - full Codex session-storage lifecycle across isolated accounts;

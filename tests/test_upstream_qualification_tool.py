@@ -50,6 +50,10 @@ def _checkout(tmp_path: Path) -> tuple[Path, str]:
     async def _start_session_unlocked(self):
         await self._spawn_tmux()
         self._save_state()
+
+    async def switch_or_start_session(self):
+        replacement_name = "cc-n100123-44"
+        replacement_name = f"{replacement_name}-switch-{time.time_ns():x}"
 """,
         encoding="utf-8",
     )
@@ -98,6 +102,7 @@ def test_upstream_tool_emits_release_bound_gate_evidence(tmp_path: Path) -> None
     assert {item["id"] for item in evidence["assertions"]} == {
         "exact_commit",
         "tmux_naming",
+        "resume_switch_tmux_naming",
         "spawn_before_state_save",
         "safe_binary_launch",
     }

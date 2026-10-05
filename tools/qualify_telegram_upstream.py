@@ -56,6 +56,19 @@ def _qualify_tmux_name(checkout: Path) -> dict[str, Any]:
     return cases
 
 
+def _qualify_resume_switch_name(checkout: Path) -> dict[str, str]:
+    path = checkout / "src/telegram_bot/core/services/tmux_manager.py"
+    node = _function(path, "switch_or_start_session")
+    source = ast.unparse(node)
+    qualified_expression = "replacement_name = f'{replacement_name}-switch-{time.time_ns():x}'"
+    if qualified_expression not in source:
+        raise RuntimeError("upstream live /resume tmux naming contract changed")
+    return {
+        "base": "cc-n100123-44",
+        "live_resume_form": "cc-n100123-44-switch-<hex time_ns>",
+    }
+
+
 def _qualify_state_order(checkout: Path) -> dict[str, int]:
     path = checkout / "src/telegram_bot/core/services/tmux_manager.py"
     node = _function(path, "_start_session_unlocked")
@@ -94,6 +107,7 @@ def build_evidence(args: argparse.Namespace) -> dict[str, object]:
         raise RuntimeError("upstream checkout is dirty")
 
     tmux_name = _qualify_tmux_name(checkout)
+    resume_switch_name = _qualify_resume_switch_name(checkout)
     state_order = _qualify_state_order(checkout)
     environment_contract = _qualify_sanitized_environment(checkout)
     evidence: dict[str, object] = {
@@ -118,6 +132,11 @@ def build_evidence(args: argparse.Namespace) -> dict[str, object]:
                 "id": "tmux_naming",
                 "passed": True,
                 "cases": tmux_name,
+            },
+            {
+                "id": "resume_switch_tmux_naming",
+                "passed": True,
+                "contract": resume_switch_name,
             },
             {
                 "id": "spawn_before_state_save",
