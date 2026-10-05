@@ -19,6 +19,136 @@ from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
 
 @pytest.mark.asyncio
+async def test_clear_after_resume_switch_waits_for_new_upstream_state(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    profile = tmp_path / "profiles" / "work"
+    profile.mkdir(parents=True, mode=0o700)
+    (profile / "auth.json").write_text("{}", encoding="utf-8")
+    (profile / "auth.json").chmod(0o600)
+    real_codex = tmp_path / "codex-real"
+    real_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_codex.chmod(0o700)
+    topic_config = tmp_path / "topic_config.json"
+    topic_config.write_text(
+        json.dumps(
+            {"topics": {"42": {"cwd": str(project), "engine": "codex", "exec_mode": "tmux"}}}
+        ),
+        encoding="utf-8",
+    )
+    switched_name = "cc-n1001-42-switch-18dba53c902bb319"
+    tmux_state = tmp_path / "tmux_state.json"
+
+    def write_state(session_id: str | None) -> None:
+        tmux_state.write_text(
+            json.dumps(
+                {
+                    "-1001:42": {
+                        "session_name": switched_name,
+                        "cwd": str(project),
+                        "provider": "codex",
+                        "session_id": session_id,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_state("old-session")
+    config = RuntimeConfig(
+        agent_instance_id="agent-1",
+        forum_chat_id=-1001,
+        state_dir=tmp_path / "runtime-state",
+        socket_path=tmp_path / "run/runtime.sock",
+        database_path=tmp_path / "runtime-state/runtime.sqlite",
+        real_codex=real_codex,
+        real_codex_version="test-1",
+        real_codex_sha256=f"sha256:{hashlib.sha256(real_codex.read_bytes()).hexdigest()}",
+        profiles_root=tmp_path / "profiles",
+        topic_config_path=topic_config,
+        tmux_state_path=tmux_state,
+        upstream_sha="0" * 40,
+        allowed_project_roots=(tmp_path,),
+    )
+    daemon = RuntimeServer(
+        config,
+        phase_b_timeout=1.0,
+        identity_verifier=lambda _identity: None,
+        child_verifier=lambda **_kwargs: {},
+    )
+    binding = RuntimeBinding(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        chat_id=-1001,
+        thread_id=42,
+        project_id="project-1",
+        canonical_cwd=str(project),
+        expected_tmux_session="cc-n1001-42",
+        config_digest=read_topic_config(topic_config).digest,
+    )
+    daemon.store.upsert_binding(binding)
+    spec = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(project),
+        provider="codex",
+        account_profile="work",
+        model="gpt-test",
+        reasoning_effort="high",
+        generation_id="gen-1",
+        revision=1,
+        source_kind="cus_ui",
+        source_ref="user:1",
+    )
+    daemon.store.put_effective_spec(
+        spec,
+        codex_home=profile,
+        profile_fingerprint=profile_fingerprint(profile),
+    )
+    pid = os.getpid()
+    identity = {
+        "wrapper": {"pid": pid, "starttime": proc_starttime(pid), "uid": os.getuid()},
+        "cwd": str(project),
+        "tmux_session": switched_name,
+        "tmux_pane": "%1",
+    }
+    registration = daemon._register(
+        str(uuid.uuid4()),
+        {"agent_instance_id": "agent-1", "resume_session_id": None, **identity},
+        pid,
+        os.getuid(),
+    )
+    assert registration["ok"] is True
+    registered = daemon.store.get_registered_instance(registration["instance_id"])
+    assert registered is not None
+    assert registered.launch_spec["replaced_session_id"] == "old-session"
+
+    verification = asyncio.create_task(
+        daemon._verify_started(
+            str(uuid.uuid4()),
+            {
+                "agent_instance_id": "agent-1",
+                "instance_id": registration["instance_id"],
+                "binding_id": "binding-1",
+                "child_pid": pid,
+                "child_starttime": proc_starttime(pid),
+                **identity,
+            },
+            pid,
+            os.getuid(),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not verification.done()
+    write_state(None)
+    verified = await verification
+    assert verified["ok"] is True
+    assert verified["verified"] is True
+    assert verified["session_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir(mode=0o700)

@@ -10,7 +10,7 @@ from ai_agent_runtime.telegram_upstream.adapter import (
     matches_managed_tmux_name,
 )
 from ai_agent_runtime.telegram_upstream.correlation import phase_a_correlate, phase_b_verify
-from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
+from ai_agent_runtime.telegram_upstream.tmux_state import UpstreamTmuxState, read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
     read_topic_config,
     reconcile_managed_topic,
@@ -86,6 +86,78 @@ def test_phase_a_allows_qualified_live_resume_switch_only_with_resume_id(
             resume_session_id="owned-session",
         )
         == binding
+    )
+
+    prior_state = UpstreamTmuxState(
+        chat_id=-1001,
+        thread_id=42,
+        session_name=identity.tmux_session,
+        cwd=str(cwd),
+        provider="codex",
+        session_id="old-session",
+        transcript_path=None,
+    )
+    assert (
+        phase_a_correlate(
+            identity=identity,
+            bindings=(binding,),
+            topic_config=snapshot,
+            states=(prior_state,),
+        )
+        == binding
+    )
+    with pytest.raises(RuntimeFailureError) as foreign_state:
+        phase_a_correlate(
+            identity=identity,
+            bindings=(binding,),
+            topic_config=snapshot,
+            states=(prior_state.__class__(
+                chat_id=-1001,
+                thread_id=43,
+                session_name=identity.tmux_session,
+                cwd=str(cwd),
+                provider="codex",
+                session_id="old-session",
+                transcript_path=None,
+            ),),
+        )
+    assert foreign_state.value.code is ErrorCode.UNKNOWN_BINDING
+    with pytest.raises(RuntimeFailureError) as ambiguous_state:
+        phase_a_correlate(
+            identity=identity,
+            bindings=(binding,),
+            topic_config=snapshot,
+            states=(prior_state, prior_state),
+        )
+    assert ambiguous_state.value.code is ErrorCode.UNKNOWN_BINDING
+
+    with pytest.raises(RuntimeFailureError) as stale_phase_b:
+        phase_b_verify(
+            binding=binding,
+            identity=identity,
+            states=(prior_state,),
+            topic_config=snapshot,
+            replaced_session_id="old-session",
+        )
+    assert stale_phase_b.value.code is ErrorCode.CORRELATION_MISMATCH
+    fresh_state = UpstreamTmuxState(
+        chat_id=-1001,
+        thread_id=42,
+        session_name=identity.tmux_session,
+        cwd=str(cwd),
+        provider="codex",
+        session_id=None,
+        transcript_path=None,
+    )
+    assert (
+        phase_b_verify(
+            binding=binding,
+            identity=identity,
+            states=(fresh_state,),
+            topic_config=snapshot,
+            replaced_session_id="old-session",
+        )
+        == fresh_state
     )
 
 

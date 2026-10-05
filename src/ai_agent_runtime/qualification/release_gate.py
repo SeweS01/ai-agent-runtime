@@ -53,6 +53,7 @@ QUALIFICATION_GATES: Final[dict[str, tuple[str, ...]]] = {
         "new",
         "resume_same_binding_same_account",
         "resume_foreign_binding_denied",
+        "clear_after_resume_switch",
         "tui",
         "kill",
         "recycle",

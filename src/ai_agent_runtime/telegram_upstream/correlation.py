@@ -12,19 +12,60 @@ from .tmux_state import UpstreamTmuxState
 from .topic_config import TopicConfigSnapshot
 
 
+def reused_switch_state(
+    *,
+    binding: RuntimeBinding,
+    identity: WrapperIdentity,
+    states: tuple[UpstreamTmuxState, ...],
+) -> UpstreamTmuxState | None:
+    """Prove that a fresh launch reuses a qualified live-switch tmux name.
+
+    Pinned upstream `/new` respawns the current tmux session under its existing
+    name. After `/resume` this may be a `-switch-<hex>` name, although the new
+    Codex invocation is not a resume. Only a unique durable upstream entry for
+    the same topic and previous session may authorize that provisional launch.
+    """
+
+    if identity.tmux_session == binding.expected_tmux_session or not matches_managed_tmux_name(
+        expected=binding.expected_tmux_session,
+        observed=identity.tmux_session,
+        resume_requested=True,
+    ):
+        return None
+    matches = tuple(
+        state
+        for state in states
+        if state.chat_id == binding.chat_id
+        and state.thread_id == binding.thread_id
+        and state.session_name == identity.tmux_session
+        and state.provider == "codex"
+        and state.session_id
+        and Path(state.cwd).resolve() == Path(binding.canonical_cwd).resolve()
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
 def phase_a_identity_candidates(
     *,
     identity: WrapperIdentity,
     bindings: tuple[RuntimeBinding, ...],
     resume_session_id: str | None = None,
+    states: tuple[UpstreamTmuxState, ...] = (),
 ) -> tuple[RuntimeBinding, ...]:
     return tuple(
         binding
         for binding in bindings
-        if matches_managed_tmux_name(
-            expected=binding.expected_tmux_session,
-            observed=identity.tmux_session,
-            resume_requested=resume_session_id is not None,
+        if (
+            matches_managed_tmux_name(
+                expected=binding.expected_tmux_session,
+                observed=identity.tmux_session,
+                resume_requested=resume_session_id is not None,
+            )
+            or (
+                resume_session_id is None
+                and reused_switch_state(binding=binding, identity=identity, states=states)
+                is not None
+            )
         )
         and Path(binding.canonical_cwd).resolve() == Path(identity.cwd).resolve()
     )
@@ -36,11 +77,13 @@ def phase_a_correlate(
     bindings: tuple[RuntimeBinding, ...],
     topic_config: TopicConfigSnapshot,
     resume_session_id: str | None = None,
+    states: tuple[UpstreamTmuxState, ...] = (),
 ) -> RuntimeBinding:
     candidates = phase_a_identity_candidates(
         identity=identity,
         bindings=bindings,
         resume_session_id=resume_session_id,
+        states=states,
     )
     if not candidates:
         raise RuntimeFailureError(
@@ -81,6 +124,7 @@ def phase_b_verify(
     identity: WrapperIdentity,
     states: tuple[UpstreamTmuxState, ...],
     topic_config: TopicConfigSnapshot,
+    replaced_session_id: str | None = None,
 ) -> UpstreamTmuxState:
     candidates = tuple(
         state
@@ -95,6 +139,11 @@ def phase_b_verify(
         raise RuntimeFailureError(
             ErrorCode.CORRELATION_MISMATCH,
             f"expected one upstream state entry, found {len(candidates)}",
+        )
+    if replaced_session_id is not None and candidates[0].session_id == replaced_session_id:
+        raise RuntimeFailureError(
+            ErrorCode.CORRELATION_MISMATCH,
+            "upstream state still describes the session replaced by /new",
         )
     entry = topic_config.topic(binding.thread_id)
     if entry is None or not entry.is_managed_candidate:

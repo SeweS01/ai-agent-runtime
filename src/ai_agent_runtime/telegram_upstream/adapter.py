@@ -17,7 +17,8 @@ def matches_managed_tmux_name(
 
     `switch_or_start_session` appends `-switch-{time.time_ns():x}` while the
     previous pane is alive. This shape is qualified for the pinned upstream
-    SHA; only a provenance-checked resume may use the temporary form.
+    SHA. A fresh launch under a reused switch name is handled separately by
+    Phase A only when the exact previous upstream state entry proves ownership.
     """
 
     if observed == expected:

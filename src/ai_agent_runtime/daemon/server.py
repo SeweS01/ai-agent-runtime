@@ -63,6 +63,7 @@ from ai_agent_runtime.telegram_upstream.correlation import (
     phase_a_correlate,
     phase_a_identity_candidates,
     phase_b_verify,
+    reused_switch_state,
 )
 from ai_agent_runtime.telegram_upstream.session_view import (
     SessionViewError,
@@ -364,6 +365,7 @@ class RuntimeServer:
         self.identity_verifier(identity)
         wrapper_executable = process_executable_evidence(identity.pid)
         config_snapshot = read_topic_config(self.config.topic_config_path)
+        state_snapshot = read_tmux_states(self.config.tmux_state_path)
         bindings = self.store.list_bindings(self.config.agent_instance_id)
         resume_session_id = payload.get("resume_session_id")
         if resume_session_id is not None and (
@@ -376,12 +378,14 @@ class RuntimeServer:
                 bindings=bindings,
                 topic_config=config_snapshot,
                 resume_session_id=resume_session_id,
+                states=state_snapshot,
             )
         except RuntimeFailureError as exc:
             candidates = phase_a_identity_candidates(
                 identity=identity,
                 bindings=bindings,
                 resume_session_id=resume_session_id,
+                states=state_snapshot,
             )
             if exc.code is ErrorCode.UNSUPPORTED_CODEX_SUBPROCESS and len(candidates) == 1:
                 self.store.enqueue_user_notification(
@@ -462,6 +466,14 @@ class RuntimeServer:
             "real_codex_version": self.config.real_codex_version,
             "real_codex_sha256": real_digest,
         }
+        if resume_session_id is None:
+            previous = reused_switch_state(
+                binding=binding,
+                identity=identity,
+                states=state_snapshot,
+            )
+            if previous is not None:
+                launch_context["replaced_session_id"] = previous.session_id
         self.store.record_instance(
             instance_id=instance_id,
             binding_id=binding.binding_id,
@@ -1366,6 +1378,11 @@ class RuntimeServer:
         if not isinstance(raw_desired, dict):
             raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "instance desired spec is invalid")
         spec = _desired_spec(raw_desired)
+        replaced_session_id = launch.get("replaced_session_id")
+        if replaced_session_id is not None and not isinstance(replaced_session_id, str):
+            raise RuntimeFailureError(
+                ErrorCode.INVALID_REQUEST, "replaced session id is invalid"
+            )
         codex_home = Path(_required_str(launch, "codex_home"))
         real_codex = Path(_required_str(launch, "real_codex"))
         self.child_verifier(
@@ -1386,6 +1403,7 @@ class RuntimeServer:
                     identity=identity,
                     states=read_tmux_states(self.config.tmux_state_path),
                     topic_config=read_topic_config(self.config.topic_config_path),
+                    replaced_session_id=replaced_session_id,
                 )
                 break
             except RuntimeFailureError as exc:
