@@ -8,6 +8,7 @@ database = "/home/devops/.local/state/ai-agent-runtime/ta_staging_01/runtime.sql
 [telegram_agent]
 topic_config = "/home/devops/apps/telegram-ai-agent/topic_config.json"
 tmux_state = "/home/devops/apps/telegram-ai-agent/tmux_sessions/state.json"
+tmux_tmpdir = "/run/user/1000/ai-agent-runtime/ta_staging_01/tmux"
 upstream_sha = "0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b"
 tmux_session_prefix = "cc-"
 

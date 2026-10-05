@@ -59,6 +59,33 @@ def _config_path(executable: str | None = None) -> Path:
     return Path.home() / ".config" / "ai-agent-runtime" / "config.toml"
 
 
+def _restore_tmux_selector(config: RuntimeConfig) -> None:
+    """Re-exec with the exact configured tmux selector when upstream stripped it.
+
+    The pinned Telegram Agent deliberately launches provider commands through
+    ``env -i``.  That also removes tmux's socket selector, so a wrapper cannot
+    prove which AgentInstance owns its controlling PTY.  A self-exec makes the
+    restored value part of the process's initial environment, allowing the
+    daemon to verify it independently through ``/proc``.  Missing selector
+    directories are not created here: non-tmux invocations must still fail
+    closed as unsupported.
+    """
+
+    if os.environ.get("TMUX") or os.environ.get("TMUX_TMPDIR"):
+        return
+    tmux_tmpdir = config.effective_tmux_tmpdir
+    if not tmux_tmpdir.is_dir():
+        return
+    environment = dict(os.environ)
+    environment["TMUX_TMPDIR"] = str(tmux_tmpdir)
+    os.execve(
+        sys.executable,
+        [sys.executable, sys.argv[0], *sys.argv[1:]],
+        environment,
+    )
+    raise RuntimeError("wrapper self-exec returned unexpectedly")
+
+
 def _tmux_identity(pane: str) -> str:
     completed = subprocess.run(
         ("tmux", "display-message", "-p", "-t", pane, "#{session_name}"),
@@ -390,6 +417,10 @@ def run(argv: list[str]) -> int:
         return 0
     config = RuntimeConfig.load(_config_path())
     config.validate()
+    try:
+        _restore_tmux_selector(config)
+    except OSError as exc:
+        _fail(ErrorCode.UNKNOWN_BINDING.value, f"cannot restore tmux selector: {exc}")
 
     pane = os.environ.get("TMUX_PANE")
     if pane:

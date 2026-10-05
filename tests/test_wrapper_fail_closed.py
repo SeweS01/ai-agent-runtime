@@ -1,5 +1,6 @@
 import hashlib
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,32 @@ def test_tmux_identity_recovery_rejects_ambiguous_tty(
 
     with pytest.raises(RuntimeError, match="maps to 2 tmux panes"):
         wrapper_main._tmux_identity_from_controlling_tty()
+
+
+def test_wrapper_reexec_restores_configured_tmux_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmux_tmpdir = tmp_path / "instance" / "tmux"
+    tmux_tmpdir.mkdir(parents=True)
+    config = replace(RuntimeConfig.defaults(), tmux_tmpdir=tmux_tmpdir)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_TMPDIR", raising=False)
+    monkeypatch.setattr(wrapper_main.sys, "argv", ["/safe/codex-wrapper@agent-1", "--flag"])
+    observed: dict[str, object] = {}
+
+    def fake_execve(executable: str, argv: list[str], environment: dict[str, str]) -> None:
+        observed.update(executable=executable, argv=argv, environment=environment)
+
+    monkeypatch.setattr(wrapper_main.os, "execve", fake_execve)
+    with pytest.raises(RuntimeError, match="self-exec returned unexpectedly"):
+        wrapper_main._restore_tmux_selector(config)
+    assert observed["argv"] == [
+        wrapper_main.sys.executable,
+        "/safe/codex-wrapper@agent-1",
+        "--flag",
+    ]
+    assert isinstance(observed["environment"], dict)
+    assert observed["environment"]["TMUX_TMPDIR"] == str(tmux_tmpdir)
 
 
 def test_version_is_answered_locally_without_running_real_codex(

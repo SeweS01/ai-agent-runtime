@@ -36,6 +36,7 @@ class RuntimeConfig:
     tmux_state_path: Path
     upstream_sha: str
     tmux_session_prefix: str = "cc-"
+    tmux_tmpdir: Path | None = None
     allowed_project_roots: tuple[Path, ...] = ()
     retirement_enabled: bool = False
     retirement_qualification_report_id: str = ""
@@ -98,6 +99,11 @@ class RuntimeConfig:
             tmux_state_path=Path(telegram.get("tmux_state", defaults.tmux_state_path)).expanduser(),
             upstream_sha=str(telegram.get("upstream_sha", "")),
             tmux_session_prefix=str(telegram.get("tmux_session_prefix", "cc-")),
+            tmux_tmpdir=(
+                Path(str(telegram["tmux_tmpdir"])).expanduser()
+                if "tmux_tmpdir" in telegram
+                else None
+            ),
             allowed_project_roots=tuple(Path(item).expanduser() for item in raw_roots),
             retirement_enabled=retirement_enabled,
             retirement_qualification_report_id=str(
@@ -136,6 +142,9 @@ class RuntimeConfig:
             raise ValueError("database_path must be contained by state_dir")
         if self.socket_path.parent == Path("/"):
             raise ValueError("socket_path must use a private non-root directory")
+        tmux_tmpdir = self.effective_tmux_tmpdir
+        if not tmux_tmpdir.is_absolute() or tmux_tmpdir == Path("/") or ".." in tmux_tmpdir.parts:
+            raise ValueError("tmux_tmpdir must be an absolute non-root traversal-free path")
         if not self.allowed_project_roots:
             raise ValueError("policy.allowed_project_roots must not be empty")
         if any(not root.is_absolute() for root in self.allowed_project_roots):
@@ -154,6 +163,18 @@ class RuntimeConfig:
             )
         if not 5.0 <= self.control_plane_stale_after_seconds <= 3600.0:
             raise ValueError("policy.control_plane_stale_after_seconds must be between 5 and 3600")
+
+    @property
+    def effective_tmux_tmpdir(self) -> Path:
+        """Return the qualified per-AgentInstance tmux selector directory.
+
+        Pinned upstream starts the configured Codex binary through ``env -i``
+        and therefore may remove ``TMUX_TMPDIR``.  Runtime socket and tmux
+        directories share the same private AgentInstance root by default; an
+        explicit value supports deployments with a different layout.
+        """
+
+        return self.tmux_tmpdir or self.socket_path.parent / "tmux"
 
 
 def _table(raw: dict[str, Any], key: str) -> dict[str, Any]:

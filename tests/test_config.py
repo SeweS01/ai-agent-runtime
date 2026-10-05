@@ -49,3 +49,8 @@ def test_control_plane_stale_window_is_bounded(tmp_path: Path, value: float) -> 
     )
     with pytest.raises(ValueError, match="control_plane_stale_after_seconds"):
         config.validate()
+
+
+def test_tmux_tmpdir_defaults_beside_runtime_socket() -> None:
+    config = RuntimeConfig.defaults()
+    assert config.effective_tmux_tmpdir == config.socket_path.parent / "tmux"
