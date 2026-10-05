@@ -252,6 +252,9 @@ def _audit_instance(
             "database_path": str(config.database_path),
             "topic_config_path": str(config.topic_config_path),
             "tmux_state_path": str(config.tmux_state_path),
+            "sessions_view_root": (
+                str(config.sessions_view_root) if config.sessions_view_root is not None else None
+            ),
             "errors": errors,
         },
         errors,
@@ -367,6 +370,13 @@ def audit_deployment_manifest(
     for field, values in identity_fields.items():
         if len(values) != len(set(str(value) for value in values)):
             errors.append(f"deployment_{field}_not_unique")
+    view_roots = [
+        str(item["sessions_view_root"])
+        for item in instances
+        if item.get("sessions_view_root") is not None
+    ]
+    if len(view_roots) != len(set(view_roots)):
+        errors.append("deployment_sessions_view_root_not_unique")
     state_dirs = [Path(str(value)) for value in identity_fields["state_dir"]]
     for index, first in enumerate(state_dirs):
         for second in state_dirs[index + 1 :]:

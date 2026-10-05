@@ -48,6 +48,18 @@ also refreshes the same durable lease. Lease expiry changes observability to
 
 ## Codex rollout observation
 
+The pinned upstream discovers TUI transcripts under its process
+`HOME/.codex/sessions`, whereas each real Codex child writes under its private
+`CODEX_HOME/sessions`. An AgentInstance can use a private Telegram Agent `HOME`
+and configure `telegram_agent.sessions_view_root` in Runtime. The Codex adapter
+projects only owned `sessions/YYYY/MM/DD/rollout-*.jsonl` files from configured
+account profiles into that view as symlinks. Runtime adds new rollouts while
+running; conflicting names, unsafe source paths, or an unsafe view deny new
+managed launches and surface an error. The original profiles, credentials,
+indexes, SQLite state, and archives are not merged or modified. A complete
+multi-account storage and resume qualification remains required before
+production activation.
+
 The Codex adapter is version-qualified. For `codex-cli 0.156.1`, Runtime treats only
 matching `task_started`, `turn_context`, and `task_complete` records as lifecycle and
 configuration evidence. A `turn_context` must belong to the active turn and explicitly
@@ -90,6 +102,8 @@ Retirement remains disabled by default and requires a qualification report
 identifier. A deterministic pinned-upstream retirement harness exists, but only a
 staging artifact can satisfy the release gate. Pinned-upstream source qualification
 now emits release-tuple-bound evidence, and rollback inputs can be pinned and
-reverified without authorizing cleanup. Real Telegram/Codex E2E, session storage
-lifecycle, and rollback-drill evidence remain production release blockers. This
-milestone is not a production release.
+reverified without authorizing cleanup. One real Telegram-to-Codex-to-Telegram
+staging smoke passed on 2026-10-05 using an isolated single-profile sessions
+view; it is not complete release-tuple qualification. Multi-account session
+storage lifecycle, race qualification, and rollback-drill evidence remain
+production release blockers. This milestone is not a production release.

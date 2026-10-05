@@ -26,6 +26,17 @@ upstream release tuple, staging evidence, and rollback manifest must be validate
 The production Telegram Agent drop-in must retain `KillMode=process` so its restart
 does not recursively destroy qualified tmux/wrapper/Codex processes.
 
+For the optional transcript projection, create an owned private directory for
+`[telegram_agent] sessions_view_root` and give that AgentInstance's upstream
+service a separate `HOME` whose `.codex/sessions` resolves to this view. Keep
+the instance-named wrapper config reachable under the new `HOME` because pinned
+upstream strips arbitrary environment variables from provider launches. The
+Runtime daemon projects only rollout-file links from verified account profiles;
+it never merges profile homes or changes the user's existing `~/.codex` tree.
+The service's `HOME`, view link, profile set, fresh rollout discovery, resume,
+archive lifecycle, and rollback topology must be qualified together. A single
+successful Telegram response is not a full storage-lifecycle qualification.
+
 CI builds the wheel from the checked-out source and publishes it as the
 `ai-agent-runtime-wheel` workflow artifact. Record that exact file's SHA-256 in the
 release record, and install it into a

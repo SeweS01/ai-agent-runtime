@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import socket
 import stat
@@ -62,6 +63,10 @@ from ai_agent_runtime.telegram_upstream.correlation import (
     phase_a_correlate,
     phase_a_identity_candidates,
     phase_b_verify,
+)
+from ai_agent_runtime.telegram_upstream.session_view import (
+    SessionViewError,
+    project_session_transcripts,
 )
 from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
@@ -137,6 +142,7 @@ def _verify_legacy_process_evidence(
 
 
 _PEERCRED = struct.Struct("3i")
+logger = logging.getLogger(__name__)
 
 
 def _prepare_runtime_socket(path: Path) -> None:
@@ -205,8 +211,10 @@ class RuntimeServer:
         self.retirement_executor = retirement_executor
         self.evidence_interval = evidence_interval
         self._results: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
+        self._session_view_error: str | None = None
 
     async def serve(self) -> None:
+        self._project_session_view_once()
         _prepare_runtime_socket(self.config.socket_path)
         server = await asyncio.start_unix_server(self._handle, path=self.config.socket_path)
         os.chmod(self.config.socket_path, 0o600)
@@ -216,6 +224,7 @@ class RuntimeServer:
         wrapper_reaper = asyncio.create_task(self._reap_absent_wrappers_loop())
         evidence_collector = asyncio.create_task(self._collect_applied_evidence_loop())
         rollout_observer = asyncio.create_task(self._observe_codex_rollouts_loop())
+        session_view = asyncio.create_task(self._session_view_loop())
         retirement = (
             asyncio.create_task(self._retire_pending_loop())
             if self.config.retirement_enabled
@@ -232,6 +241,7 @@ class RuntimeServer:
             wrapper_reaper.cancel()
             evidence_collector.cancel()
             rollout_observer.cancel()
+            session_view.cancel()
             if retirement is not None:
                 retirement.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -244,6 +254,8 @@ class RuntimeServer:
                 await evidence_collector
             with contextlib.suppress(asyncio.CancelledError):
                 await rollout_observer
+            with contextlib.suppress(asyncio.CancelledError):
+                await session_view
             if retirement is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await retirement
@@ -408,6 +420,14 @@ class RuntimeServer:
                 "real Codex digest differs from qualified release tuple",
             )
         safe_home = validate_profile_path(codex_home, root=self.config.profiles_root)
+        try:
+            self._project_session_view_once()
+        except (OSError, ValueError, SessionViewError) as exc:
+            self._session_view_error = f"{type(exc).__name__}: {exc}"
+            raise RuntimeFailureError(
+                ErrorCode.SESSION_VIEW_UNAVAILABLE,
+                f"qualified upstream transcript view is unavailable: {exc}",
+            ) from exc
         instance_id = str(uuid.uuid4())
         launch_context: dict[str, object] = {
             "wrapper_identity": {
@@ -1482,6 +1502,10 @@ class RuntimeServer:
             age_seconds is not None and age_seconds <= self.config.control_plane_stale_after_seconds
         )
         raw_bindings = report.get("bindings")
+        if isinstance(raw_bindings, list) and self._session_view_error is not None:
+            for binding in raw_bindings:
+                if isinstance(binding, dict) and binding.get("health") == "RUNTIME_HEALTHY":
+                    binding["health"] = "ERROR"
         if isinstance(raw_bindings, list) and not in_sync:
             for binding in raw_bindings:
                 if isinstance(binding, dict) and binding.get("health") == "RUNTIME_HEALTHY":
@@ -1492,7 +1516,43 @@ class RuntimeServer:
             "age_seconds": age_seconds,
             "stale_after_seconds": self.config.control_plane_stale_after_seconds,
         }
+        report["session_view"] = {
+            "configured": self.config.sessions_view_root is not None,
+            "root": str(self.config.sessions_view_root) if self.config.sessions_view_root else None,
+            "error": self._session_view_error,
+        }
         return self._ok(request_id, status=report)
+
+    def _project_session_view_once(self) -> None:
+        view_root = self.config.sessions_view_root
+        if view_root is None:
+            return
+        profiles: dict[str, Path] = {}
+        for binding in self.store.list_bindings(self.config.agent_instance_id):
+            if not binding.configured:
+                continue
+            effective = self.store.get_effective_spec(binding.binding_id)
+            if effective is None:
+                continue
+            spec, raw_home, _fingerprint = effective
+            home = validate_profile_path(raw_home, root=self.config.profiles_root)
+            if home.name != spec.account_profile:
+                raise SessionViewError("effective account profile identity mismatch")
+            profiles[spec.account_profile] = home
+        if profiles:
+            project_session_transcripts(profiles=profiles, view_root=view_root)
+        self._session_view_error = None
+
+    async def _session_view_loop(self) -> None:
+        while True:
+            try:
+                self._project_session_view_once()
+            except (OSError, ValueError, SessionViewError) as exc:
+                detail = f"{type(exc).__name__}: {exc}"
+                if detail != self._session_view_error:
+                    logger.error("Transcript projection failed: %s", detail)
+                self._session_view_error = detail
+            await asyncio.sleep(1.0)
 
     def _child_exited(
         self,

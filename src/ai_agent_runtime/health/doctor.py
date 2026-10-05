@@ -134,6 +134,26 @@ def _check_profiles(config: RuntimeConfig) -> str:
     return f"root={root} verified_effective_profiles={len(rows)}"
 
 
+def _check_session_view(config: RuntimeConfig, status: dict[str, Any]) -> str:
+    root = config.sessions_view_root
+    if root is None:
+        return "not configured"
+    metadata = root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise ValueError("transcript view root has unsafe type or owner")
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError("transcript view root is group/world writable")
+    report = status.get("status")
+    if not isinstance(report, dict):
+        raise ValueError("Runtime status has no session-view report")
+    view = report.get("session_view")
+    if not isinstance(view, dict) or view.get("root") != str(root):
+        raise ValueError("Runtime session-view configuration differs from doctor")
+    if view.get("error") is not None:
+        raise ValueError(f"Runtime transcript projection failed: {view['error']}")
+    return f"root={root} projection=healthy"
+
+
 def _canonical_existing(path: str) -> str:
     return str(Path(path).resolve(strict=True))
 
@@ -221,6 +241,8 @@ async def collect_doctor_report(
             "ok": True,
             "detail": f"daemon_boot_id={status.get('daemon_boot_id', 'missing')}",
         }
+        if config.sessions_view_root is not None:
+            _record(checks, "session_view", lambda: _check_session_view(config, status))
     except Exception as exc:
         checks["runtime_status"] = {
             "ok": False,

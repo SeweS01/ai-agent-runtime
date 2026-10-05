@@ -37,6 +37,7 @@ class RuntimeConfig:
     upstream_sha: str
     tmux_session_prefix: str = "cc-"
     tmux_tmpdir: Path | None = None
+    sessions_view_root: Path | None = None
     allowed_project_roots: tuple[Path, ...] = ()
     retirement_enabled: bool = False
     retirement_qualification_report_id: str = ""
@@ -104,6 +105,11 @@ class RuntimeConfig:
                 if "tmux_tmpdir" in telegram
                 else None
             ),
+            sessions_view_root=(
+                Path(str(telegram["sessions_view_root"])).expanduser()
+                if "sessions_view_root" in telegram
+                else None
+            ),
             allowed_project_roots=tuple(Path(item).expanduser() for item in raw_roots),
             retirement_enabled=retirement_enabled,
             retirement_qualification_report_id=str(
@@ -145,6 +151,16 @@ class RuntimeConfig:
         tmux_tmpdir = self.effective_tmux_tmpdir
         if not tmux_tmpdir.is_absolute() or tmux_tmpdir == Path("/") or ".." in tmux_tmpdir.parts:
             raise ValueError("tmux_tmpdir must be an absolute non-root traversal-free path")
+        if self.sessions_view_root is not None:
+            view_root = self.sessions_view_root
+            if not view_root.is_absolute() or view_root == Path("/") or ".." in view_root.parts:
+                raise ValueError(
+                    "sessions_view_root must be an absolute non-root traversal-free path"
+                )
+            lexical_view = Path(os.path.abspath(view_root))
+            lexical_profiles = Path(os.path.abspath(self.profiles_root))
+            if lexical_view == lexical_profiles or lexical_profiles in lexical_view.parents:
+                raise ValueError("sessions_view_root must not be inside profiles_root")
         if not self.allowed_project_roots:
             raise ValueError("policy.allowed_project_roots must not be empty")
         if any(not root.is_absolute() for root in self.allowed_project_roots):

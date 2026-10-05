@@ -43,6 +43,7 @@ _EXIT_BY_CODE = {
     ErrorCode.CONFIG_DRIFT.value: 74,
     ErrorCode.CORRELATION_MISMATCH.value: 75,
     ErrorCode.RUNTIME_UNAVAILABLE.value: 76,
+    ErrorCode.SESSION_VIEW_UNAVAILABLE.value: 77,
 }
 
 
