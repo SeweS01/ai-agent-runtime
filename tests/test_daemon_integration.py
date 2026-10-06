@@ -311,6 +311,29 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert applied_status["effective"]["session_id"] == "session-1"
     assert applied_status["effective"]["rollout_inode"] == rollout.stat().st_ino
 
+    # A daemon restart can happen before the wrapper's first heartbeat. The
+    # persisted launch generation is still 0, while the first heartbeat is 1.
+    launch_boot_id = daemon.boot_id
+    daemon.boot_id = "restarted-before-first-heartbeat"
+    first_after_restart = await request(
+        config.socket_path,
+        versioned(
+            "heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid),
+            connection_generation=1,
+            previous_daemon_boot_id=launch_boot_id,
+            **identity,
+        ),
+    )
+    assert first_after_restart["ok"] is True
+    assert first_after_restart["resynchronized"] is True
+    assert first_after_restart["connection_generation"] == 1
+
     heartbeat = await request(
         config.socket_path,
         versioned(
@@ -322,7 +345,7 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
             child_pid=pid,
             child_starttime=proc_starttime(pid),
             connection_generation=1,
-            previous_daemon_boot_id=verified["daemon_boot_id"],
+            previous_daemon_boot_id=daemon.boot_id,
             **identity,
         ),
     )

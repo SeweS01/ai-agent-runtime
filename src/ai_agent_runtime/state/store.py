@@ -918,7 +918,12 @@ class RuntimeStore:
             if resynchronized:
                 if previous_daemon_boot_id != stored_boot_id:
                     raise KeyError("heartbeat previous daemon boot identity mismatch")
-                if connection_generation != stored_generation:
+                # A launch is stored at generation 0; the wrapper's *first*
+                # heartbeat uses generation 1. A daemon may restart between
+                # verify_started and that heartbeat, so permit exactly this
+                # initial 0 -> 1 transition during resync as well.
+                expected_generation = 1 if stored_generation == 0 else stored_generation
+                if connection_generation != expected_generation:
                     raise KeyError("heartbeat generation changed before daemon resync ACK")
             else:
                 if previous_daemon_boot_id != daemon_boot_id:
