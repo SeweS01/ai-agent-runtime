@@ -379,7 +379,10 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert resynchronized["daemon_boot_id"] == daemon.boot_id
     assert resynchronized["connection_generation"] == 1
 
-    stale_boot = await request(
+    # The daemon may have persisted the resync while its ACK was lost. A retry
+    # with the same exact process identity and generation must return the new
+    # boot ID, not strand the wrapper forever.
+    lost_ack_retry = await request(
         config.socket_path,
         versioned(
             "heartbeat",
@@ -394,8 +397,65 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
             **identity,
         ),
     )
+    assert lost_ack_retry["ok"] is True
+    assert lost_ack_retry["resynchronized"] is True
+
+    post_ack = await request(
+        config.socket_path,
+        versioned(
+            "heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid),
+            connection_generation=2,
+            previous_daemon_boot_id=daemon.boot_id,
+            **identity,
+        ),
+    )
+    assert post_ack["ok"] is True
+
+    stale_boot = await request(
+        config.socket_path,
+        versioned(
+            "heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid),
+            connection_generation=2,
+            previous_daemon_boot_id=previous_boot_id,
+            **identity,
+        ),
+    )
     assert stale_boot["ok"] is False
     assert stale_boot["error"]["code"] == "CORRELATION_MISMATCH"
+
+    # A second restart can occur after the wrapper advanced to generation 3
+    # but before that generation has been persisted by the daemon.
+    second_previous_boot_id = daemon.boot_id
+    daemon.boot_id = "another-rapid-daemon-restart"
+    rapid_restart = await request(
+        config.socket_path,
+        versioned(
+            "heartbeat",
+            str(uuid.uuid4()),
+            agent_instance_id="agent-1",
+            instance_id=registration["instance_id"],
+            binding_id="binding-1",
+            child_pid=pid,
+            child_starttime=proc_starttime(pid),
+            connection_generation=3,
+            previous_daemon_boot_id=second_previous_boot_id,
+            **identity,
+        ),
+    )
+    assert rapid_restart["ok"] is True
+    assert rapid_restart["resynchronized"] is True
 
     wrong_heartbeat = await request(
         config.socket_path,

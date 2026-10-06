@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS instances (
     launch_spec_json TEXT,
     daemon_boot_id TEXT,
     connection_generation INTEGER,
+    resync_from_boot_id TEXT,
     last_heartbeat_at REAL,
     updated_at REAL NOT NULL
 );
@@ -239,6 +240,7 @@ class RuntimeStore:
             "connection_generation",
             "INTEGER",
         )
+        self._ensure_column("instances", "resync_from_boot_id", "TEXT")
         self._ensure_column("instances", "last_heartbeat_at", "REAL")
         self._ensure_column("outbox", "ordering_sequence", "INTEGER")
         self._backfill_outbox_ordering_sequences()
@@ -887,7 +889,8 @@ class RuntimeStore:
         with self._connection:
             row = self._connection.execute(
                 """
-                SELECT lifecycle, daemon_boot_id, connection_generation FROM instances
+                SELECT lifecycle, daemon_boot_id, connection_generation,
+                       resync_from_boot_id FROM instances
                 WHERE instance_id=? AND binding_id=?
                   AND wrapper_pid=? AND wrapper_starttime=?
                   AND child_pid=? AND child_starttime=?
@@ -914,32 +917,58 @@ class RuntimeStore:
             if not isinstance(raw_stored_generation, int):
                 raise KeyError("heartbeat instance has no connection generation")
             stored_generation = raw_stored_generation
+            resync_from_boot_id = row["resync_from_boot_id"]
             resynchronized = stored_boot_id != daemon_boot_id
             if resynchronized:
-                if previous_daemon_boot_id != stored_boot_id:
+                if previous_daemon_boot_id not in {
+                    stored_boot_id, resync_from_boot_id
+                }:
                     raise KeyError("heartbeat previous daemon boot identity mismatch")
                 # A launch is stored at generation 0; the wrapper's *first*
                 # heartbeat uses generation 1. A daemon may restart between
                 # verify_started and that heartbeat, so permit exactly this
-                # initial 0 -> 1 transition during resync as well.
+                # initial 0 -> 1 transition during resync as well. After a
+                # successful resync ACK the wrapper increments its generation;
+                # a second daemon restart can occur before that next heartbeat.
                 expected_generation = 1 if stored_generation == 0 else stored_generation
-                if connection_generation != expected_generation:
+                allowed_generations = {expected_generation}
+                if stored_generation > 0:
+                    allowed_generations.add(stored_generation + 1)
+                if connection_generation not in allowed_generations:
                     raise KeyError("heartbeat generation changed before daemon resync ACK")
+                next_resync_from_boot_id = (
+                    resync_from_boot_id
+                    if previous_daemon_boot_id == resync_from_boot_id
+                    else stored_boot_id
+                )
             else:
-                if previous_daemon_boot_id != daemon_boot_id:
+                replayed_resync = (
+                    isinstance(resync_from_boot_id, str)
+                    and previous_daemon_boot_id == resync_from_boot_id
+                    and connection_generation == stored_generation
+                )
+                if previous_daemon_boot_id != daemon_boot_id and not replayed_resync:
                     raise KeyError("heartbeat daemon boot identity mismatch")
                 if connection_generation < stored_generation:
                     raise KeyError("heartbeat connection generation regressed")
+                resynchronized = replayed_resync
+                next_resync_from_boot_id = (
+                    None
+                    if previous_daemon_boot_id == daemon_boot_id
+                    and connection_generation > stored_generation
+                    else resync_from_boot_id
+                )
             self._connection.execute(
                 """
                 UPDATE instances
-                SET daemon_boot_id=?, connection_generation=?,
+                SET daemon_boot_id=?, connection_generation=?, resync_from_boot_id=?,
                     last_heartbeat_at=?, updated_at=?
                 WHERE instance_id=?
                 """,
                 (
                     daemon_boot_id,
                     connection_generation,
+                    next_resync_from_boot_id,
                     heartbeat_at,
                     heartbeat_at,
                     instance_id,
