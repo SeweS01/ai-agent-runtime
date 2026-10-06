@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -64,11 +65,20 @@ def test_retirement_entrypoint_reexecs_with_sanitized_environment(
     assert captured["stdin"] is subprocess.DEVNULL
 
 
+def test_submitted_prompt_with_failure_alert_is_unsafe() -> None:
+    evidence = retirement_harness.PromptEvidence(
+        submitted=Counter({"prompt": 1}), explicit_alerts=Counter({"prompt": 1})
+    )
+    assert retirement_harness._prompt_outcomes(evidence, ("prompt",)) == {
+        "prompt": "contradictory_alert"
+    }
+
+
 @pytest.mark.skipif(
     not (UPSTREAM_ROOT / ".git").is_dir() or not UPSTREAM_PYTHON.is_file(),
     reason="pinned Telegram Agent qualification checkout/environment absent",
 )
-def test_pinned_upstream_retirement_fault_matrix_is_safe(tmp_path: Path) -> None:
+def test_pinned_upstream_delivery_fault_matrix_exposes_first_launch_bug(tmp_path: Path) -> None:
     release_tuple = {
         "telegram_agent_sha": UPSTREAM_SHA,
         "codex_version": "0.156.1",
@@ -105,16 +115,22 @@ def test_pinned_upstream_retirement_fault_matrix_is_safe(tmp_path: Path) -> None
         timeout=180,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
     evidence = json.loads(output.read_text(encoding="utf-8"))
     assert evidence["schema"] == QUALIFICATION_EVIDENCE_SCHEMA
     assert evidence["gate_id"] == "retirement_race"
-    assert evidence["status"] == "PASS"
+    assert evidence["status"] == "FAIL"
     assert evidence["environment"] == "local"
     assert evidence["release_tuple_digest"] == release_tuple_digest(release_tuple)
     assertions = {item["id"]: item for item in evidence["assertions"]}
     assert set(assertions) == set(QUALIFICATION_GATES["retirement_race"])
-    assert all(item["passed"] is True for item in assertions.values())
-    assert all(item["silent_loss"] is False for item in assertions.values())
-    assert all(item["duplicate_execution"] is False for item in assertions.values())
-    assert all(item["misroute"] is False for item in assertions.values())
+    assert assertions["first_launch_delayed_accept"]["passed"] is False
+    assert assertions["first_launch_delayed_accept"]["contradictory_alert"] is True
+    assert assertions["first_launch_delayed_accept"]["prompt_outcomes"] == {
+        "race-first_launch_delayed_accept-1": "contradictory_alert"
+    }
+    assert all(
+        item["passed"] is True
+        for key, item in assertions.items()
+        if key != "first_launch_delayed_accept"
+    )

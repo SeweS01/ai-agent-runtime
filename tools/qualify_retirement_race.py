@@ -38,6 +38,7 @@ from ai_agent_runtime.qualification.release_gate import (  # noqa: E402
 )
 
 WINDOWS = (
+    "first_launch_delayed_accept",
     "after_is_active_before_paste",
     "during_paste",
     "after_paste_before_enter",
@@ -69,15 +70,9 @@ def _run_with_upstream_environment(upstream: Path, argv: list[str]) -> int | Non
     python = upstream / ".venv" / "bin" / "python"
     if not python.exists() or not os.access(python, os.X_OK):
         raise SystemExit(f"pinned upstream Python is unavailable: {python}")
-    environment = {
-        key: os.environ[key]
-        for key in _SAFE_ENV_KEYS
-        if os.environ.get(key)
-    }
+    environment = {key: os.environ[key] for key in _SAFE_ENV_KEYS if os.environ.get(key)}
     environment[_CHILD_MARKER] = "1"
-    environment["PYTHONPATH"] = os.pathsep.join(
-        str(path) for path in _runtime_python_paths()
-    )
+    environment["PYTHONPATH"] = os.pathsep.join(str(path) for path in _runtime_python_paths())
     completed = subprocess.run(
         [str(python), "-m", "tools.qualify_retirement_race", *argv],
         check=False,
@@ -251,7 +246,9 @@ def _prompt_outcomes(evidence: PromptEvidence, prompts: tuple[str, ...]) -> dict
     for prompt in prompts:
         submitted = evidence.submitted[prompt]
         alerts = evidence.explicit_alerts[prompt]
-        if submitted == 1:
+        if submitted > 0 and alerts > 0:
+            outcomes[prompt] = "contradictory_alert"
+        elif submitted == 1:
             outcomes[prompt] = "exactly_once"
         elif submitted == 0 and alerts >= 1:
             outcomes[prompt] = "explicit_not_delivered"
@@ -266,7 +263,25 @@ async def run_window(window: str, upstream_root: Path, scratch: Path) -> dict[st
     scenario = UpstreamScenario(upstream_root, scratch / window)
     prompts = (f"race-{window}-1",)
     with scenario.patches():
-        if window == "after_is_active_before_paste":
+        if window == "first_launch_delayed_accept":
+            # The first Enter is accepted by Codex, but its input bar still
+            # displays the prompt for longer than upstream's settle budget.
+            # Upstream must not tell the user to resend an already accepted
+            # prompt. This reproduces the real 2026-10-06 staging failure.
+            scenario.manager._codex_prompt_still_in_input_bar = (  # type: ignore[method-assign]
+                lambda _pane, _prompt: True
+            )
+            enter_calls = 0
+
+            async def delayed_enter(_session_name: str) -> None:
+                nonlocal enter_calls
+                enter_calls += 1
+                if enter_calls == 1:
+                    scenario.evidence.submitted[prompts[0]] += 1
+
+            scenario.tmux_module.send_enter = delayed_enter
+            await scenario.dispatch(prompts[0], 1)
+        elif window == "after_is_active_before_paste":
             original_is_active = scenario.manager.is_active
             calls = 0
 
@@ -354,7 +369,8 @@ async def run_window(window: str, upstream_root: Path, scratch: Path) -> dict[st
     outcomes = _prompt_outcomes(scenario.evidence, prompts)
     silent_loss = any(outcome == "silent_loss" for outcome in outcomes.values())
     duplicate = any(outcome == "duplicate_execution" for outcome in outcomes.values())
-    safe = not silent_loss and not duplicate
+    contradictory_alert = any(outcome == "contradictory_alert" for outcome in outcomes.values())
+    safe = not silent_loss and not duplicate and not contradictory_alert
     overall = (
         "exactly_once"
         if safe and all(outcome == "exactly_once" for outcome in outcomes.values())
@@ -368,6 +384,7 @@ async def run_window(window: str, upstream_root: Path, scratch: Path) -> dict[st
         "outcome": overall,
         "silent_loss": silent_loss,
         "duplicate_execution": duplicate,
+        "contradictory_alert": contradictory_alert,
         "misroute": False,
         "prompt_outcomes": outcomes,
         "submitted_counts": dict(scenario.evidence.submitted),

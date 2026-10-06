@@ -46,6 +46,7 @@ def _write_evidence(
                     "outcome": "exactly_once",
                     "silent_loss": False,
                     "duplicate_execution": False,
+                    "contradictory_alert": False,
                     "misroute": False,
                 }
             )
@@ -107,6 +108,39 @@ def test_missing_gate_blocks_release(tmp_path: Path) -> None:
     assert report["telegram_e2e_verified"] is False
     assert report["missing_gate_ids"] == ["telegram_e2e"]
     assert "telegram_e2e:evidence_missing" in report["errors"]
+
+
+@pytest.mark.parametrize(
+    ("gate_id", "assertion_id"),
+    [
+        ("telegram_e2e", "first_launch_reply_exactly_once"),
+        ("cus_bot_onboarding", "user_created_topic_auto_notice"),
+    ],
+)
+def test_repeated_staging_regressions_cannot_be_omitted_from_evidence(
+    tmp_path: Path, gate_id: str, assertion_id: str
+) -> None:
+    path = _complete_manifest(tmp_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    reference = next(item for item in manifest["evidence"] if item["gate_id"] == gate_id)
+    evidence_path = Path(reference["path"])
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence["assertions"] = [item for item in evidence["assertions"] if item["id"] != assertion_id]
+    evidence["evidence_digest"] = _digest(
+        {key: value for key, value in evidence.items() if key != "evidence_digest"}
+    )
+    evidence_path.write_text(json.dumps(evidence, sort_keys=True) + "\n", encoding="utf-8")
+    import hashlib
+
+    reference["sha256"] = "sha256:" + hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    manifest["manifest_digest"] = _digest(
+        {key: value for key, value in manifest.items() if key != "manifest_digest"}
+    )
+    path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+
+    report = verify_qualification_manifest(path)
+    assert report["accepted"] is False
+    assert f"{gate_id}:{assertion_id}:missing" in report["errors"]
 
 
 def test_tampered_evidence_is_rejected_by_manifest_hash(tmp_path: Path) -> None:

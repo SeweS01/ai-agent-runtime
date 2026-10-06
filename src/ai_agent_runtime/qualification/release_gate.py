@@ -46,6 +46,8 @@ QUALIFICATION_GATES: Final[dict[str, tuple[str, ...]]] = {
     ),
     "telegram_e2e": (
         "prompt_correct_binding",
+        "first_launch_prompt_accepted",
+        "first_launch_reply_exactly_once",
         "rollout_discovered",
         "final_answer_exactly_once",
     ),
@@ -87,6 +89,7 @@ QUALIFICATION_GATES: Final[dict[str, tuple[str, ...]]] = {
         "rollback",
     ),
     "retirement_race": (
+        "first_launch_delayed_accept",
         "after_is_active_before_paste",
         "during_paste",
         "after_paste_before_enter",
@@ -106,6 +109,7 @@ QUALIFICATION_GATES: Final[dict[str, tuple[str, ...]]] = {
         "runtime_restart_preserves_child",
     ),
     "cus_bot_onboarding": (
+        "user_created_topic_auto_notice",
         "exact_topic_notice",
         "exact_topic_miniapp",
         "backend_apply_before_success",
@@ -245,7 +249,12 @@ def _validate_retirement_assertions(assertions: dict[str, dict[str, Any]]) -> li
             continue
         if assertion.get("outcome") not in allowed_outcomes:
             errors.append(f"retirement_race:{assertion_id}:invalid_outcome")
-        for forbidden in ("silent_loss", "duplicate_execution", "misroute"):
+        for forbidden in (
+            "silent_loss",
+            "duplicate_execution",
+            "contradictory_alert",
+            "misroute",
+        ):
             if assertion.get(forbidden) is not False:
                 errors.append(f"retirement_race:{assertion_id}:{forbidden}_not_false")
     return errors

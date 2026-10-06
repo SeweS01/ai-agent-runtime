@@ -126,7 +126,8 @@ not replace real Telegram/Codex E2E or retirement race tests.
 
 The deterministic retirement harness must be executed with the pinned upstream
 Python environment. It imports the exact upstream `TmuxManager` and Telegram send
-path, injects external tmux disappearance in all six required windows, and records
+path, injects external tmux disappearance in all six required windows plus a
+delayed-accept first-launch window, and records
 per-prompt submission and explicit-alert evidence:
 
 ```bash
@@ -147,6 +148,20 @@ upstream control-flow. An upstream alert callback is evidence of an
 explicit-not-delivered outcome; actual Telegram delivery remains covered by the
 separate `telegram_e2e` gate. A locally produced artifact remains
 `environment=local` and cannot satisfy the release verifier.
+
+The `telegram_e2e` gate must include a **fresh first launch** from a configured
+user-created topic: prove that the upstream queue accepted the prompt, the
+Codex rollout contains exactly one copy of it, and the final answer was sent
+to Telegram exactly once. A Codex rollout alone is insufficient: the pinned
+upstream can report `enter_did_not_clear_after_retries` while Codex later
+executes the prompt, leaving transcript discovery and Telegram delivery
+unstarted. Do not automatically resend after this alert. Keep the gate failed
+until the live Telegram result is verified.
+
+The `cus_bot_onboarding` gate separately requires a **user-created topic** to
+receive its setup notice automatically, without an operator manually issuing
+the token or sending the message. A synthetic webhook test or manual recovery
+does not satisfy `user_created_topic_auto_notice`.
 
 ## Session-storage topology manifest
 
