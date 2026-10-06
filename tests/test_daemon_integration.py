@@ -20,7 +20,10 @@ from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
 
 @pytest.mark.asyncio
-async def test_clear_after_resume_switch_waits_for_new_upstream_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("switched_name", [False, True])
+async def test_clear_waits_for_new_upstream_state(
+    tmp_path: Path, switched_name: bool
+) -> None:
     project = tmp_path / "project"
     project.mkdir(mode=0o700)
     profile = tmp_path / "profiles" / "work"
@@ -37,7 +40,9 @@ async def test_clear_after_resume_switch_waits_for_new_upstream_state(tmp_path: 
         ),
         encoding="utf-8",
     )
-    switched_name = "cc-n1001-42-switch-18dba53c902bb319"
+    tmux_name = (
+        "cc-n1001-42-switch-18dba53c902bb319" if switched_name else "cc-n1001-42"
+    )
     tmux_state = tmp_path / "tmux_state.json"
 
     def write_state(session_id: str | None) -> None:
@@ -45,7 +50,7 @@ async def test_clear_after_resume_switch_waits_for_new_upstream_state(tmp_path: 
             json.dumps(
                 {
                     "-1001:42": {
-                        "session_name": switched_name,
+                        "session_name": tmux_name,
                         "cwd": str(project),
                         "provider": "codex",
                         "session_id": session_id,
@@ -111,7 +116,7 @@ async def test_clear_after_resume_switch_waits_for_new_upstream_state(tmp_path: 
     identity = {
         "wrapper": {"pid": pid, "starttime": proc_starttime(pid), "uid": os.getuid()},
         "cwd": str(project),
-        "tmux_session": switched_name,
+        "tmux_session": tmux_name,
         "tmux_pane": "%1",
     }
     registration = daemon._register(

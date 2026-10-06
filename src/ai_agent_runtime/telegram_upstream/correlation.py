@@ -12,21 +12,21 @@ from .tmux_state import UpstreamTmuxState
 from .topic_config import TopicConfigSnapshot
 
 
-def reused_switch_state(
+def replaced_start_state(
     *,
     binding: RuntimeBinding,
     identity: WrapperIdentity,
     states: tuple[UpstreamTmuxState, ...],
 ) -> UpstreamTmuxState | None:
-    """Prove that a fresh launch reuses a qualified live-switch tmux name.
+    """Find the previous durable state for a fresh launch under the same tmux name.
 
-    Pinned upstream `/new` respawns the current tmux session under its existing
-    name. After `/resume` this may be a `-switch-<hex>` name, although the new
-    Codex invocation is not a resume. Only a unique durable upstream entry for
-    the same topic and previous session may authorize that provisional launch.
+    Pinned upstream `/new` and `/clear` respawn tmux under its existing name,
+    including a `-switch-<hex>` name after `/resume`. A prior session ID must
+    be remembered for both forms: otherwise Phase B and AppliedSpec could
+    mistake the still-durable old rollout for the new Codex process.
     """
 
-    if identity.tmux_session == binding.expected_tmux_session or not matches_managed_tmux_name(
+    if not matches_managed_tmux_name(
         expected=binding.expected_tmux_session,
         observed=identity.tmux_session,
         resume_requested=True,
@@ -63,7 +63,7 @@ def phase_a_identity_candidates(
             )
             or (
                 resume_session_id is None
-                and reused_switch_state(binding=binding, identity=identity, states=states)
+                and replaced_start_state(binding=binding, identity=identity, states=states)
                 is not None
             )
         )

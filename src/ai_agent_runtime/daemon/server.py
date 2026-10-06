@@ -63,7 +63,7 @@ from ai_agent_runtime.telegram_upstream.correlation import (
     phase_a_correlate,
     phase_a_identity_candidates,
     phase_b_verify,
-    reused_switch_state,
+    replaced_start_state,
 )
 from ai_agent_runtime.telegram_upstream.session_view import (
     SessionViewError,
@@ -469,7 +469,7 @@ class RuntimeServer:
             "real_codex_sha256": real_digest,
         }
         if resume_session_id is None:
-            previous = reused_switch_state(
+            previous = replaced_start_state(
                 binding=binding,
                 identity=identity,
                 states=state_snapshot,
