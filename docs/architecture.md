@@ -44,6 +44,13 @@ development/operator convenience, not the production namespace mechanism.
   independent file writer, so updates use eventual reconciliation rather than a
   false cross-process transaction guarantee.
 
+Runtime's Linux topic-config adapter atomically exchanges its candidate with the
+current file and retains each displaced version. This allows a bounded merge of
+upstream topic creates/renames observed during a Runtime write without modifying
+upstream source. A concurrent engine/mode/cwd change is not silently overwritten;
+managed launch remains blocked until the observed state is reconciled. The adapter
+does not claim strict serialization with upstream's separate in-process locks.
+
 CUS availability is not in the wrapper startup path. CUS sends a namespaced local
 heartbeat during periodic reconciliation, and every successful desired-state apply
 also refreshes the same durable lease. Lease expiry changes observability to

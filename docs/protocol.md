@@ -43,10 +43,18 @@ Telegram Agent configuration, Runtime verifies:
 - canonical DesiredSpec digest;
 - monotonic revision within the existing generation.
 
-The upstream-created topic key must already exist. Runtime then performs a fresh-read
-allowlisted patch, atomic replace, backup, and post-write verification before storing
-the local effective spec. A different generation is rejected from this incremental
-action and requires `apply_snapshot`.
+The upstream-created topic key must already exist. Runtime performs a fresh-read
+allowlisted patch and publishes it with Linux `renameat2(RENAME_EXCHANGE)`, retaining
+the exact displaced file as a private backup. If an independent upstream writer
+changed the file between read and exchange, Runtime performs a bounded merge of
+new topic keys and unmanaged fields before post-write verification and storing the
+local effective spec. A concurrent managed-field change is restored and rejected
+as `CONFIG_DRIFT`; it is not retried as an implicit return to Codex. If atomic
+exchange is unavailable, the write fails closed. This is still eventual
+reconciliation, not a cross-process transaction: sustained contention can exhaust
+the bounded attempts and requires operator inspection of retained backups. A
+different generation is rejected from this incremental action and requires
+`apply_snapshot`.
 
 The continuous fresh-read watcher records a missing topic key or a changed managed
 cwd as `CONFIG_DRIFT`; it never silently recreates the key and managed launch remains

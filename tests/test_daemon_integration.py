@@ -15,6 +15,7 @@ from ai_agent_runtime.errors import RuntimeFailureError
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.process_safety import proc_starttime, profile_fingerprint
+from ai_agent_runtime.telegram_upstream import topic_config as topic_config_adapter
 from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
 
@@ -1113,3 +1114,123 @@ def test_project_relocation_denies_live_binding(tmp_path: Path) -> None:
     }
     with pytest.raises(RuntimeFailureError, match="stopped"):
         daemon._validate_project_relocations([relocation])
+
+
+def test_apply_binding_does_not_retry_over_concurrent_engine_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    profile = tmp_path / "profiles" / "work"
+    profile.mkdir(parents=True, mode=0o700)
+    (profile / "auth.json").write_text("{}", encoding="utf-8")
+    (profile / "auth.json").chmod(0o600)
+    real_codex = tmp_path / "codex-real"
+    real_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_codex.chmod(0o700)
+    topic_config = tmp_path / "topic_config.json"
+    topic_config.write_text(
+        json.dumps(
+            {
+                "topics": {
+                    "42": {
+                        "cwd": str(project),
+                        "engine": "codex",
+                        "exec_mode": "tmux",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = RuntimeConfig(
+        agent_instance_id="agent-1",
+        forum_chat_id=-1001,
+        state_dir=tmp_path / "state",
+        socket_path=tmp_path / "run/runtime.sock",
+        database_path=tmp_path / "state/runtime.sqlite",
+        real_codex=real_codex,
+        real_codex_version="test",
+        real_codex_sha256=f"sha256:{hashlib.sha256(real_codex.read_bytes()).hexdigest()}",
+        profiles_root=tmp_path / "profiles",
+        topic_config_path=topic_config,
+        tmux_state_path=tmp_path / "tmux-state.json",
+        upstream_sha="0" * 40,
+        allowed_project_roots=(tmp_path,),
+    )
+    daemon = RuntimeServer(config)
+    spec = DesiredSpec.build(
+        binding_id="binding-1",
+        agent_instance_id="agent-1",
+        project_id="project-1",
+        canonical_cwd=str(project),
+        provider="codex",
+        account_profile="work",
+        model="gpt-test",
+        reasoning_effort="high",
+        generation_id="gen-1",
+        revision=1,
+    )
+    payload = {
+        "binding": {
+            "binding_id": spec.binding_id,
+            "agent_instance_id": spec.agent_instance_id,
+            "chat_id": -1001,
+            "thread_id": 42,
+            "project_id": spec.project_id,
+            "canonical_cwd": spec.canonical_cwd,
+        },
+        "desired": {
+            "binding_id": spec.binding_id,
+            "agent_instance_id": spec.agent_instance_id,
+            "project_id": spec.project_id,
+            "canonical_cwd": spec.canonical_cwd,
+            "provider": spec.provider,
+            "account_profile": spec.account_profile,
+            "model": spec.model,
+            "reasoning_effort": spec.reasoning_effort,
+            "generation_id": spec.generation_id,
+            "revision": spec.revision,
+            "spec_digest": spec.spec_digest,
+        },
+    }
+    real_exchange = topic_config_adapter._exchange_paths
+    exchanges = 0
+
+    def exchange(source: Path, target: Path) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        if exchanges == 1:
+            upstream = json.loads(topic_config.read_text(encoding="utf-8"))
+            upstream["topics"]["42"]["engine"] = "claude"
+            replacement = tmp_path / "upstream.tmp"
+            replacement.write_text(json.dumps(upstream), encoding="utf-8")
+            replacement.replace(topic_config)
+        real_exchange(source, target)
+
+    monkeypatch.setattr(topic_config_adapter, "_exchange_paths", exchange)
+    try:
+        with pytest.raises(RuntimeFailureError) as failure:
+            daemon._apply_binding(str(uuid.uuid4()), payload)
+        assert failure.value.code.value == "CONFIG_DRIFT"
+        assert exchanges == 2
+        assert read_topic_config(topic_config).topic(42).engine == "claude"  # type: ignore[union-attr]
+        assert daemon.store.get_binding(spec.binding_id) is None
+        daemon.store.upsert_binding(
+            RuntimeBinding(
+                binding_id=spec.binding_id,
+                agent_instance_id=spec.agent_instance_id,
+                chat_id=-1001,
+                thread_id=42,
+                project_id=spec.project_id,
+                canonical_cwd=spec.canonical_cwd,
+                expected_tmux_session="cc-n1001-42",
+            )
+        )
+        with pytest.raises(RuntimeFailureError) as repeat_failure:
+            daemon._apply_binding(str(uuid.uuid4()), payload)
+        assert repeat_failure.value.code.value == "CONFIG_DRIFT"
+        assert exchanges == 2
+        assert read_topic_config(topic_config).topic(42).engine == "claude"  # type: ignore[union-attr]
+    finally:
+        daemon.store.close()

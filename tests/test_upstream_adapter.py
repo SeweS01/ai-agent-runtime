@@ -5,6 +5,7 @@ import pytest
 
 from ai_agent_runtime.domain import RuntimeBinding, WrapperIdentity
 from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
+from ai_agent_runtime.telegram_upstream import topic_config as topic_config_adapter
 from ai_agent_runtime.telegram_upstream.adapter import (
     TelegramUpstreamAdapter,
     matches_managed_tmux_name,
@@ -111,15 +112,17 @@ def test_phase_a_allows_qualified_live_resume_switch_only_with_resume_id(
             identity=identity,
             bindings=(binding,),
             topic_config=snapshot,
-            states=(prior_state.__class__(
-                chat_id=-1001,
-                thread_id=43,
-                session_name=identity.tmux_session,
-                cwd=str(cwd),
-                provider="codex",
-                session_id="old-session",
-                transcript_path=None,
-            ),),
+            states=(
+                prior_state.__class__(
+                    chat_id=-1001,
+                    thread_id=43,
+                    session_name=identity.tmux_session,
+                    cwd=str(cwd),
+                    provider="codex",
+                    session_id="old-session",
+                    transcript_path=None,
+                ),
+            ),
         )
     assert foreign_state.value.code is ErrorCode.UNKNOWN_BINDING
     with pytest.raises(RuntimeFailureError) as ambiguous_state:
@@ -215,6 +218,186 @@ def test_topic_snapshot_reconcile_is_one_atomic_write(tmp_path: Path) -> None:
     assert after.topic(42).raw["custom"] == "a"  # type: ignore[union-attr]
     assert after.topic(43).raw["custom"] == "b"  # type: ignore[union-attr]
     assert len(list((tmp_path / "backups").iterdir())) == 1
+
+
+def test_concurrent_upstream_create_is_preserved_after_runtime_exchange(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "topic_config.json"
+    _write_json(path, {"topics": {"42": {"name": "Existing", "cwd": None}}})
+    before = read_topic_config(path)
+    real_exchange = topic_config_adapter._exchange_paths
+    injected = False
+
+    def exchange(source: Path, target: Path) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            upstream = json.loads(path.read_text(encoding="utf-8"))
+            upstream["topics"]["43"] = {"name": "New", "cwd": None}
+            replacement = tmp_path / "upstream.tmp"
+            _write_json(replacement, upstream)
+            replacement.replace(path)
+        real_exchange(source, target)
+
+    monkeypatch.setattr(topic_config_adapter, "_exchange_paths", exchange)
+    after = reconcile_managed_topic(
+        path,
+        thread_id=42,
+        cwd=str(tmp_path),
+        expected_digest=before.digest,
+        backup_dir=tmp_path / "backups",
+    )
+    assert injected
+    assert after.topic(42).is_managed_candidate  # type: ignore[union-attr]
+    assert after.topic(43).raw["name"] == "New"  # type: ignore[union-attr]
+    assert len(list((tmp_path / "backups").iterdir())) == 2
+
+
+def test_concurrent_upstream_rename_is_preserved_after_runtime_exchange(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "topic_config.json"
+    _write_json(path, {"topics": {"42": {"name": "Old", "cwd": None}}})
+    before = read_topic_config(path)
+    real_exchange = topic_config_adapter._exchange_paths
+    injected = False
+
+    def exchange(source: Path, target: Path) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            upstream = json.loads(path.read_text(encoding="utf-8"))
+            upstream["topics"]["42"]["name"] = "Renamed"
+            replacement = tmp_path / "upstream.tmp"
+            _write_json(replacement, upstream)
+            replacement.replace(path)
+        real_exchange(source, target)
+
+    monkeypatch.setattr(topic_config_adapter, "_exchange_paths", exchange)
+    after = reconcile_managed_topic(
+        path,
+        thread_id=42,
+        cwd=str(tmp_path),
+        expected_digest=before.digest,
+        backup_dir=tmp_path / "backups",
+    )
+    assert after.topic(42).raw["name"] == "Renamed"  # type: ignore[union-attr]
+    assert after.topic(42).is_managed_candidate  # type: ignore[union-attr]
+
+
+def test_concurrent_engine_change_is_restored_and_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "topic_config.json"
+    _write_json(
+        path,
+        {
+            "topics": {
+                "42": {
+                    "name": "Existing",
+                    "cwd": str(tmp_path),
+                    "engine": "codex",
+                    "exec_mode": "tmux",
+                }
+            }
+        },
+    )
+    before = read_topic_config(path)
+    real_exchange = topic_config_adapter._exchange_paths
+    injected = False
+
+    def exchange(source: Path, target: Path) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            upstream = json.loads(path.read_text(encoding="utf-8"))
+            upstream["topics"]["42"]["engine"] = "claude"
+            replacement = tmp_path / "upstream.tmp"
+            _write_json(replacement, upstream)
+            replacement.replace(path)
+        real_exchange(source, target)
+
+    monkeypatch.setattr(topic_config_adapter, "_exchange_paths", exchange)
+    with pytest.raises(RuntimeError, match="managed fields changed"):
+        reconcile_managed_topic(
+            path,
+            thread_id=42,
+            cwd=str(tmp_path),
+            expected_digest=before.digest,
+            backup_dir=tmp_path / "backups",
+        )
+    assert read_topic_config(path).topic(42).engine == "claude"  # type: ignore[union-attr]
+
+
+def test_concurrent_upstream_delete_is_restored_and_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "topic_config.json"
+    _write_json(
+        path,
+        {"topics": {"42": {"cwd": str(tmp_path), "engine": "codex", "exec_mode": "tmux"}}},
+    )
+    before = read_topic_config(path)
+    real_exchange = topic_config_adapter._exchange_paths
+    injected = False
+
+    def exchange(source: Path, target: Path) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            replacement = tmp_path / "upstream.tmp"
+            _write_json(replacement, {"topics": {}})
+            replacement.replace(path)
+        real_exchange(source, target)
+
+    monkeypatch.setattr(topic_config_adapter, "_exchange_paths", exchange)
+    with pytest.raises(RuntimeError, match="managed fields changed"):
+        reconcile_managed_topic(
+            path,
+            thread_id=42,
+            cwd=str(tmp_path),
+            expected_digest=before.digest,
+            backup_dir=tmp_path / "backups",
+        )
+    assert read_topic_config(path).topic(42) is None
+
+
+def test_two_stale_upstream_creates_are_both_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "topic_config.json"
+    original = {"topics": {"42": {"name": "Existing", "cwd": None}}}
+    _write_json(path, original)
+    before = read_topic_config(path)
+    real_exchange = topic_config_adapter._exchange_paths
+    exchanges = 0
+
+    def exchange(source: Path, target: Path) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        if exchanges in (1, 2):
+            # The second upstream writer loaded its stale snapshot before the
+            # first create, so its atomic replace does not include topic 43.
+            concurrent = json.loads(json.dumps(original))
+            thread = "43" if exchanges == 1 else "44"
+            concurrent["topics"][thread] = {"name": f"New {thread}", "cwd": None}
+            replacement = tmp_path / f"upstream-{exchanges}.tmp"
+            _write_json(replacement, concurrent)
+            replacement.replace(path)
+        real_exchange(source, target)
+
+    monkeypatch.setattr(topic_config_adapter, "_exchange_paths", exchange)
+    after = reconcile_managed_topic(
+        path,
+        thread_id=42,
+        cwd=str(tmp_path),
+        expected_digest=before.digest,
+        backup_dir=tmp_path / "backups",
+    )
+    assert exchanges == 3
+    assert after.topic(43).raw["name"] == "New 43"  # type: ignore[union-attr]
+    assert after.topic(44).raw["name"] == "New 44"  # type: ignore[union-attr]
 
 
 def test_two_phase_correlation(tmp_path: Path) -> None:

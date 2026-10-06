@@ -71,6 +71,7 @@ from ai_agent_runtime.telegram_upstream.session_view import (
 )
 from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
+    TopicConfigManagedConflictError,
     read_topic_config,
     reconcile_managed_topic,
     reconcile_managed_topics,
@@ -603,6 +604,14 @@ class RuntimeServer:
         snapshot = None
         for _ in range(3):
             before = read_topic_config(self.config.topic_config_path)
+            current_entry = before.topic(thread_id)
+            if existing_binding is not None and (
+                current_entry is None or not current_entry.is_managed_candidate
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.CONFIG_DRIFT,
+                    "existing binding left codex+tmux; CUS will not restore it implicitly",
+                )
             try:
                 snapshot = reconcile_managed_topic(
                     self.config.topic_config_path,
@@ -613,6 +622,8 @@ class RuntimeServer:
                 )
                 break
             except KeyError as exc:
+                raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
+            except TopicConfigManagedConflictError as exc:
                 raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
             except RuntimeError:
                 continue
@@ -887,6 +898,17 @@ class RuntimeServer:
                 )
         if managed_topics:
             for _ in range(3):
+                for binding, _spec, _home, _fingerprint in prepared:
+                    existing = self.store.get_binding(binding.binding_id)
+                    if existing is None or binding.management_mode == ManagementMode.UNMANAGED:
+                        continue
+                    entry = snapshot.topic(binding.thread_id)
+                    if entry is None or not entry.is_managed_candidate:
+                        raise RuntimeFailureError(
+                            ErrorCode.CONFIG_DRIFT,
+                            "existing binding left codex+tmux; "
+                            "CUS snapshot will not restore it implicitly",
+                        )
                 try:
                     snapshot = reconcile_managed_topics(
                         self.config.topic_config_path,
@@ -896,6 +918,8 @@ class RuntimeServer:
                     )
                     break
                 except KeyError as exc:
+                    raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
+                except TopicConfigManagedConflictError as exc:
                     raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
                 except RuntimeError:
                     snapshot = read_topic_config(self.config.topic_config_path)
@@ -1380,9 +1404,7 @@ class RuntimeServer:
         spec = _desired_spec(raw_desired)
         replaced_session_id = launch.get("replaced_session_id")
         if replaced_session_id is not None and not isinstance(replaced_session_id, str):
-            raise RuntimeFailureError(
-                ErrorCode.INVALID_REQUEST, "replaced session id is invalid"
-            )
+            raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, "replaced session id is invalid")
         codex_home = Path(_required_str(launch, "codex_home"))
         real_codex = Path(_required_str(launch, "real_codex"))
         self.child_verifier(
