@@ -400,6 +400,41 @@ def test_two_stale_upstream_creates_are_both_preserved(
     assert after.topic(44).raw["name"] == "New 44"  # type: ignore[union-attr]
 
 
+def test_exhausted_concurrent_writes_fail_with_recoverable_upstream_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "topic_config.json"
+    _write_json(path, {"topics": {"42": {"name": "Existing", "cwd": None}}})
+    real_exchange = topic_config_adapter._exchange_paths
+    exchanges = 0
+
+    def exchange(source: Path, target: Path) -> None:
+        nonlocal exchanges
+        exchanges += 1
+        upstream = json.loads(path.read_text(encoding="utf-8"))
+        upstream["topics"][str(42 + exchanges)] = {
+            "name": f"New {42 + exchanges}", "cwd": None
+        }
+        replacement = tmp_path / f"upstream-{exchanges}.tmp"
+        _write_json(replacement, upstream)
+        replacement.replace(path)
+        real_exchange(source, target)
+
+    monkeypatch.setattr(topic_config_adapter, "_exchange_paths", exchange)
+    with pytest.raises(
+        topic_config_adapter.TopicConfigUnresolvedConflictError,
+        match="recover upstream changes from",
+    ) as failure:
+        reconcile_managed_topic(
+            path, thread_id=42, cwd=str(tmp_path), expected_digest=None,
+            backup_dir=tmp_path / "backups",
+        )
+    assert exchanges == topic_config_adapter._MAX_CONCURRENT_WRITES
+    recovery_path = Path(str(failure.value).split("recover upstream changes from ", 1)[1])
+    assert recovery_path.is_file()
+    assert json.loads(recovery_path.read_text(encoding="utf-8"))["topics"]["46"]["name"] == "New 46"
+
+
 def test_two_phase_correlation(tmp_path: Path) -> None:
     cwd = tmp_path / "project"
     cwd.mkdir()

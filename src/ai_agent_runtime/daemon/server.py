@@ -72,6 +72,7 @@ from ai_agent_runtime.telegram_upstream.session_view import (
 from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
     TopicConfigManagedConflictError,
+    TopicConfigUnresolvedConflictError,
     read_topic_config,
     reconcile_managed_topic,
     reconcile_managed_topics,
@@ -623,7 +624,7 @@ class RuntimeServer:
                 break
             except KeyError as exc:
                 raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
-            except TopicConfigManagedConflictError as exc:
+            except (TopicConfigManagedConflictError, TopicConfigUnresolvedConflictError) as exc:
                 raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
             except RuntimeError:
                 continue
@@ -919,7 +920,7 @@ class RuntimeServer:
                     break
                 except KeyError as exc:
                     raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
-                except TopicConfigManagedConflictError as exc:
+                except (TopicConfigManagedConflictError, TopicConfigUnresolvedConflictError) as exc:
                     raise RuntimeFailureError(ErrorCode.CONFIG_DRIFT, str(exc)) from exc
                 except RuntimeError:
                     snapshot = read_topic_config(self.config.topic_config_path)

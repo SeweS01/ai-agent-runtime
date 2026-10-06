@@ -52,7 +52,10 @@ local effective spec. A concurrent managed-field change is restored and rejected
 as `CONFIG_DRIFT`; it is not retried as an implicit return to Codex. If atomic
 exchange is unavailable, the write fails closed. This is still eventual
 reconciliation, not a cross-process transaction: sustained contention can exhaust
-the bounded attempts and requires operator inspection of retained backups. A
+the bounded attempts. In that case `TopicConfigUnresolvedConflictError` names the
+last retained upstream backup, the binding apply fails as `CONFIG_DRIFT`, and CUS
+must not retry it as a successful apply from the published candidate; an operator
+must inspect the backup and reconcile the upstream topic inventory. A
 different generation is rejected from this incremental action and requires
 `apply_snapshot`.
 

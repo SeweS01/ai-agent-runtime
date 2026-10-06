@@ -22,6 +22,10 @@ class TopicConfigManagedConflictError(RuntimeError):
     """An upstream managed-field change must not be retried as a CUS write."""
 
 
+class TopicConfigUnresolvedConflictError(RuntimeError):
+    """A bounded merge stopped while an upstream version still needs recovery."""
+
+
 def _exchange_paths(left: Path, right: Path) -> None:
     """Publish while retaining the exact file displaced by a concurrent writer.
 
@@ -166,6 +170,7 @@ def reconcile_managed_topics(
     base = before
     conflict = False
     expected_displaced_digest = before.digest
+    last_displaced_backup: Path | None = None
     for attempt in range(_MAX_CONCURRENT_WRITES):
         base_topics = base.raw["topics"]
         assert isinstance(base_topics, dict)
@@ -215,6 +220,7 @@ def reconcile_managed_topics(
                 backup_dir / f"topic-config-displaced-{time.time_ns()}-{attempt}.json"
             )
             os.replace(tmp_path, displaced_backup)
+            last_displaced_backup = displaced_backup
             os.chmod(displaced_backup, 0o600)
             dir_fd = os.open(path.parent, os.O_RDONLY)
             try:
@@ -239,7 +245,13 @@ def reconcile_managed_topics(
                 added_topics[key] = value
         base = displaced
     else:
-        raise RuntimeError("topic_config changed during all reconciliation attempts")
+        # The last displaced upstream file may contain a topic absent from the
+        # published candidate. Never let an outer CUS retry claim success from
+        # that candidate; the archived version requires explicit reconciliation.
+        raise TopicConfigUnresolvedConflictError(
+            "topic_config concurrent writes exceeded merge limit; "
+            f"recover upstream changes from {last_displaced_backup}"
+        )
 
     after = read_topic_config(path)
     for thread_id, cwd in managed_topics.items():
