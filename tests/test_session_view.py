@@ -46,6 +46,31 @@ def test_projects_multiple_profiles_without_merging_other_state(tmp_path: Path) 
     assert repeated.existing == 2
 
 
+def test_new_profile_without_sessions_bootstraps_and_is_projected_later(tmp_path: Path) -> None:
+    fresh = tmp_path / "fresh"
+    existing = tmp_path / "existing"
+    fresh.mkdir(mode=0o700)
+    existing.mkdir(mode=0o700)
+    old_rollout = _rollout(existing, "old")
+    view = tmp_path / "view"
+    view.mkdir(mode=0o700)
+
+    first = project_session_transcripts(
+        profiles={"fresh": fresh, "existing": existing}, view_root=view
+    )
+    assert first.sources == first.added == 1
+    assert (view / "2026/10/05" / old_rollout.name).resolve() == old_rollout
+
+    new_rollout = _rollout(fresh, "new")
+    second = project_session_transcripts(
+        profiles={"fresh": fresh, "existing": existing}, view_root=view
+    )
+    assert second.sources == 2
+    assert second.added == 1
+    assert second.existing == 1
+    assert (view / "2026/10/05" / new_rollout.name).resolve() == new_rollout
+
+
 def test_rollout_collision_fails_before_creating_any_links(tmp_path: Path) -> None:
     first = tmp_path / "a"
     second = tmp_path / "b"

@@ -44,6 +44,11 @@ def _owned_directory(path: Path, *, label: str, private: bool = False) -> None:
 
 
 def _rollout_sources(sessions: Path) -> list[tuple[Path, Path]]:
+    # A newly activated account has no sessions directory until its first Codex
+    # launch. Treat only that absent directory as an empty source; an existing
+    # symlink or an unsafe node must still fail closed.
+    if not sessions.exists() and not sessions.is_symlink():
+        return []
     _owned_directory(sessions, label="profile sessions directory")
     result: list[tuple[Path, Path]] = []
     for path in sessions.glob("*/*/*/rollout-*.jsonl"):
