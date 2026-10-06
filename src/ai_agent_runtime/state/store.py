@@ -1287,10 +1287,47 @@ class RuntimeStore:
             raise ValueError("persisted AppliedSpec evidence is invalid")
         return decoded
 
+    def revoke_stale_applied_spec(
+        self,
+        *,
+        instance_id: str,
+        session_id: str,
+        rollout_path: str,
+    ) -> bool:
+        """Withdraw evidence no longer corroborated by upstream state.
+
+        Session provenance is historical and remains immutable; only the live
+        process's AppliedSpec is withdrawn so a new rollout can be collected.
+        """
+
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT evidence_json FROM applied_specs WHERE instance_id=?",
+                (instance_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            evidence = json.loads(row["evidence_json"])
+            if (
+                not isinstance(evidence, dict)
+                or evidence.get("session_id") != session_id
+                or evidence.get("rollout_path") != rollout_path
+            ):
+                return False
+            self._connection.execute(
+                "DELETE FROM applied_specs WHERE instance_id=?", (instance_id,)
+            )
+            self._connection.execute(
+                "UPDATE instances SET applied_digest=NULL, updated_at=? WHERE instance_id=?",
+                (time.time(), instance_id),
+            )
+            return True
+
     def rollout_observation_targets(self) -> tuple[RolloutObservationTarget, ...]:
         rows = self._connection.execute(
             """
-            SELECT i.instance_id, i.binding_id, i.lifecycle, a.evidence_json
+            SELECT i.instance_id, i.binding_id, i.lifecycle, i.tmux_session,
+                   a.evidence_json
             FROM instances AS i
             JOIN applied_specs AS a ON a.instance_id=i.instance_id
             WHERE i.lifecycle IN ('IDLE', 'BUSY')
@@ -1307,6 +1344,7 @@ class RuntimeStore:
                     instance_id=str(row["instance_id"]),
                     binding_id=str(row["binding_id"]),
                     lifecycle=str(row["lifecycle"]),
+                    tmux_session=str(row["tmux_session"]),
                     rollout_path=str(evidence["rollout_path"]),
                     rollout_device=int(evidence["rollout_device"]),
                     rollout_inode=int(evidence["rollout_inode"]),
@@ -1332,7 +1370,19 @@ class RuntimeStore:
         if row is None:
             return RolloutObservationCursor(0, 0, None, None, None, None, None, None, None)
         if row["rollout_device"] != rollout_device or row["rollout_inode"] != rollout_inode:
-            raise ValueError("observed rollout identity changed for live instance")
+            applied = self.get_applied_evidence(instance_id)
+            if (
+                applied is None
+                or applied.get("rollout_device") != rollout_device
+                or applied.get("rollout_inode") != rollout_inode
+            ):
+                raise ValueError("observed rollout identity changed for live instance")
+            # An explicitly re-verified rollout replaced stale AppliedSpec for
+            # this process. Scan its events from the start, but do not reuse an
+            # observation sequence that may already be in the durable outbox.
+            return RolloutObservationCursor(
+                0, int(row["observation_sequence"]), None, None, None, None, None, None, None
+            )
         return RolloutObservationCursor(
             offset=int(row["offset"]),
             observation_sequence=int(row["observation_sequence"]),

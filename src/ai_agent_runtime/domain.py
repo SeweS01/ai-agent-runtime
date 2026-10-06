@@ -217,6 +217,7 @@ class RolloutObservationTarget:
     instance_id: str
     binding_id: str
     lifecycle: str
+    tmux_session: str
     rollout_path: str
     rollout_device: int
     rollout_inode: int

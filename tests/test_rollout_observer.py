@@ -5,7 +5,8 @@ from pathlib import Path
 
 from ai_agent_runtime.config import RuntimeConfig
 from ai_agent_runtime.daemon.server import RuntimeServer
-from ai_agent_runtime.domain import DesiredSpec, RuntimeBinding
+from ai_agent_runtime.domain import DesiredSpec, RolloutObservationCursor, RuntimeBinding
+from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
 
 
 def _append(path: Path, record: object) -> None:
@@ -100,6 +101,70 @@ def _daemon_with_applied_rollout(
         rollout_inode=rollout_stat.st_ino,
     )
     return daemon
+
+
+def test_stale_applied_rollout_is_revoked_after_same_name_reset(tmp_path: Path) -> None:
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.touch(mode=0o600)
+    daemon = _daemon_with_applied_rollout(tmp_path, rollout=rollout)
+    state_path = daemon.config.tmux_state_path
+    state_entry = {
+        "session_name": "cc-n1001-42",
+        "cwd": str(tmp_path / "project"),
+        "provider": "codex",
+        "session_id": "session-1",
+        "transcript_path": str(rollout),
+    }
+    state_path.write_text(json.dumps({"-1001:42": state_entry}), encoding="utf-8")
+    daemon._revoke_stale_applied_evidence(read_tmux_states(state_path))
+    assert daemon.store.get_applied_evidence("instance-1") is not None
+    old_stat = rollout.stat()
+    daemon.store.save_rollout_observation_cursor(
+        instance_id="instance-1",
+        rollout_device=old_stat.st_dev,
+        rollout_inode=old_stat.st_ino,
+        cursor=RolloutObservationCursor(10, 2, "gpt-old", "medium", None, None, None, None, None),
+        lifecycle="IDLE",
+    )
+
+    # Pinned upstream clears these fields after respawning under the same name.
+    state_entry["session_id"] = None
+    state_entry["transcript_path"] = None
+    state_path.write_text(json.dumps({"-1001:42": state_entry}), encoding="utf-8")
+    daemon._revoke_stale_applied_evidence(read_tmux_states(state_path))
+    assert daemon.store.get_applied_evidence("instance-1") is None
+    assert daemon.store.session_owner("session-1") == ("binding-1", "work")
+    assert daemon.store.status_report("agent-1")["bindings"][0]["health"] == "OUT_OF_SYNC"  # type: ignore[index]
+
+    new_rollout = tmp_path / "new-rollout.jsonl"
+    new_rollout.touch(mode=0o600)
+    new_stat = new_rollout.stat()
+    spec = daemon.store.get_effective_spec("binding-1")
+    assert spec is not None
+    daemon.store.record_applied_spec(
+        instance_id="instance-1",
+        binding_id="binding-1",
+        spec=spec[0],
+        evidence={
+            "rollout_path": str(new_rollout),
+            "rollout_device": new_stat.st_dev,
+            "rollout_inode": new_stat.st_ino,
+            "session_id": "session-2",
+            "real_codex_version": "codex-cli 0.156.1",
+        },
+        session_id="session-2",
+        account_profile="work",
+        rollout_path=str(new_rollout),
+        rollout_device=new_stat.st_dev,
+        rollout_inode=new_stat.st_ino,
+    )
+    cursor = daemon.store.rollout_observation_cursor(
+        instance_id="instance-1",
+        rollout_device=new_stat.st_dev,
+        rollout_inode=new_stat.st_ino,
+    )
+    assert cursor.offset == 0
+    assert cursor.observation_sequence == 2
 
 
 def test_structured_turn_context_creates_one_durable_observed_proposal(tmp_path: Path) -> None:

@@ -69,7 +69,7 @@ from ai_agent_runtime.telegram_upstream.session_view import (
     SessionViewError,
     project_session_transcripts,
 )
-from ai_agent_runtime.telegram_upstream.tmux_state import read_tmux_states
+from ai_agent_runtime.telegram_upstream.tmux_state import UpstreamTmuxState, read_tmux_states
 from ai_agent_runtime.telegram_upstream.topic_config import (
     TopicConfigManagedConflictError,
     TopicConfigUnresolvedConflictError,
@@ -1703,6 +1703,7 @@ class RuntimeServer:
         while True:
             try:
                 states = read_tmux_states(self.config.tmux_state_path)
+                self._revoke_stale_applied_evidence(states)
                 for instance in self.store.pending_evidence_instances():
                     binding = self.store.get_binding(instance.binding_id)
                     if binding is None:
@@ -1782,6 +1783,39 @@ class RuntimeServer:
             except (OSError, ValueError, RuntimeFailureError):
                 pass
             await asyncio.sleep(self.evidence_interval)
+
+    def _revoke_stale_applied_evidence(
+        self, states: tuple[UpstreamTmuxState, ...]
+    ) -> None:
+        """Do not keep a previous rollout attached to a newly respawned child."""
+
+        for target in self.store.rollout_observation_targets():
+            binding = self.store.get_binding(target.binding_id)
+            if binding is None:
+                continue
+            matching = tuple(
+                state
+                for state in states
+                if state.chat_id == binding.chat_id
+                and state.thread_id == binding.thread_id
+                and state.session_name == target.tmux_session
+                and state.provider == "codex"
+                and Path(state.cwd).resolve() == Path(binding.canonical_cwd).resolve()
+            )
+            current_path: Path | None = None
+            if len(matching) == 1 and matching[0].transcript_path:
+                with contextlib.suppress(OSError, RuntimeError):
+                    current_path = Path(matching[0].transcript_path).resolve(strict=True)
+            if (
+                len(matching) != 1
+                or matching[0].session_id != target.session_id
+                or current_path != Path(target.rollout_path)
+            ):
+                self.store.revoke_stale_applied_spec(
+                    instance_id=target.instance_id,
+                    session_id=target.session_id,
+                    rollout_path=target.rollout_path,
+                )
 
     async def _observe_codex_rollouts_loop(self) -> None:
         while True:
