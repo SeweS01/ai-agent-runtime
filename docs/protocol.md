@@ -121,6 +121,12 @@ reported as `DEGRADED_CUS_SYNC` while the control-plane lease is stale; stronger
 binding errors and pending states retain precedence. A nominally live instance whose
 wrapper heartbeat is absent or older than the bounded ten-second liveness window is
 `OUT_OF_SYNC`; stale durable process state can never remain `RUNTIME_HEALTHY`.
+`status.topic_discovery` is a read-only, fresh topic-config view containing only
+named upstream-created thread IDs that have no Runtime binding, plus the config
+digest. CUS uses it to recover an onboarding notice when the independent Bot API
+topic-created webhook is absent. A config read error is reported as
+`topic_discovery.status=ERROR`, never as an empty successful inventory. Runtime
+does not create topic keys or send Telegram notices.
 
 ## Durable outbox
 

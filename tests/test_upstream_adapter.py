@@ -23,6 +23,28 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_unbound_topic_discovery_uses_only_named_upstream_entries(tmp_path: Path) -> None:
+    path = tmp_path / "topic_config.json"
+    _write_json(
+        path,
+        {
+            "topics": {
+                "1": {"name": "General"},
+                "2": {"engine": "codex"},
+                "42": {"name": " Already bound "},
+                "151": {"name": " CUS Auto QA 2 ", "cwd": "/tmp/ignored"},
+                "0152": {"name": "Noncanonical"},
+                "153": {"name": " "},
+                "154": "malformed",
+                "9" * 100: {"name": "Oversized key"},
+            }
+        },
+    )
+    assert read_topic_config(path).unbound_named_topics({42}) == [
+        {"thread_id": 151, "topic_name": "CUS Auto QA 2"}
+    ]
+
+
 def test_tmux_name_matches_pinned_upstream_algorithm() -> None:
     adapter = TelegramUpstreamAdapter("0" * 40)
     assert adapter.expected_session_name(chat_id=-100123, thread_id=44) == "cc-n100123-44"

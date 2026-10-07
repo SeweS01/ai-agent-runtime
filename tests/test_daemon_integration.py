@@ -522,6 +522,8 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert instance_status["lifecycle"] == "EXITED"
     assert status["status"]["control_plane_sync"]["state"] == "DEGRADED_CUS_SYNC"
     assert status["status"]["bindings"][0]["health"] == "DEGRADED_CUS_SYNC"
+    assert status["status"]["topic_discovery"]["status"] == "OK"
+    assert status["status"]["topic_discovery"]["unbound_topics"] == []
 
     control_plane = await request(
         config.socket_path,

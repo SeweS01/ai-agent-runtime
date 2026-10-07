@@ -1543,6 +1543,19 @@ class RuntimeServer:
 
     def _status(self, request_id: str) -> dict[str, Any]:
         report = self.store.status_report(self.config.agent_instance_id)
+        try:
+            topic_snapshot = read_topic_config(self.config.topic_config_path)
+            bound_thread_ids = {
+                binding.thread_id
+                for binding in self.store.list_bindings(self.config.agent_instance_id)
+            }
+            report["topic_discovery"] = {
+                "status": "OK",
+                "config_digest": topic_snapshot.digest,
+                "unbound_topics": topic_snapshot.unbound_named_topics(bound_thread_ids),
+            }
+        except (OSError, ValueError, KeyError, TypeError):
+            report["topic_discovery"] = {"status": "ERROR", "unbound_topics": []}
         last_seen_at = self.store.control_plane_last_seen(self.config.agent_instance_id)
         now = time.time()
         age_seconds = None if last_seen_at is None else max(0.0, now - last_seen_at)

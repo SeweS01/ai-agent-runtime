@@ -96,6 +96,39 @@ class TopicConfigSnapshot:
             raw=dict(value),
         )
 
+    def unbound_named_topics(self, bound_thread_ids: set[int]) -> list[dict[str, object]]:
+        """Expose only upstream-created forum topics needing CUS onboarding.
+
+        This is a read-only discovery surface. The CUS connector still validates
+        the AgentInstance and performs the notification; Runtime never sends it.
+        """
+
+        topics = self.raw["topics"]
+        assert isinstance(topics, dict)
+        candidates: list[tuple[int, str]] = []
+        for raw_thread_id, raw_entry in topics.items():
+            if (
+                not isinstance(raw_thread_id, str)
+                or len(raw_thread_id) > 19
+                or not raw_thread_id.isdecimal()
+            ):
+                continue
+            thread_id = int(raw_thread_id)
+            if str(thread_id) != raw_thread_id or thread_id <= 1 or thread_id in bound_thread_ids:
+                continue
+            if not isinstance(raw_entry, dict):
+                continue
+            raw_name = raw_entry.get("name")
+            if not isinstance(raw_name, str):
+                continue
+            name = raw_name.strip()
+            if not name or len(name) > 256:
+                continue
+            candidates.append((thread_id, name))
+        return [
+            {"thread_id": thread_id, "topic_name": name} for thread_id, name in sorted(candidates)
+        ]
+
 
 def read_topic_config(path: Path) -> TopicConfigSnapshot:
     raw_bytes = path.read_bytes()
