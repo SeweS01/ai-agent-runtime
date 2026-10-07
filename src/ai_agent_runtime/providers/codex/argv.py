@@ -76,3 +76,18 @@ def rewrite_managed_args(argv: list[str], *, model: str, reasoning_effort: str) 
         index += 1
     rewritten.extend(("--model", model, "-c", f"model_reasoning_effort={reasoning_effort}"))
     return rewritten
+
+
+def disable_hooks_for_qualification(argv: list[str]) -> list[str]:
+    """Add a non-trusting hook override for an explicitly opted-in staging run."""
+
+    for index, token in enumerate(argv):
+        if token == "--enable=hooks" or (
+            token == "--enable" and index + 1 < len(argv) and argv[index + 1] == "hooks"
+        ):
+            raise ValueError("upstream explicitly enabled hooks")
+        if token == "--disable=hooks" or (
+            token == "--disable" and index + 1 < len(argv) and argv[index + 1] == "hooks"
+        ):
+            return list(argv)
+    return [*argv, "--disable", "hooks"]

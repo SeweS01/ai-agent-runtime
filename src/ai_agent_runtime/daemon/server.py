@@ -1582,6 +1582,9 @@ class RuntimeServer:
             "root": str(self.config.sessions_view_root) if self.config.sessions_view_root else None,
             "error": self._session_view_error,
         }
+        report["qualification_only"] = {
+            "codex_hooks_disabled": self.config.qualification_disable_codex_hooks,
+        }
         return self._ok(request_id, status=report)
 
     def _project_session_view_once(self) -> None:

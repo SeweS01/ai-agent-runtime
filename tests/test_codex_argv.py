@@ -2,6 +2,7 @@ import pytest
 
 from ai_agent_runtime.providers.codex.argv import (
     InvocationKind,
+    disable_hooks_for_qualification,
     parse_invocation,
     rewrite_managed_args,
 )
@@ -90,3 +91,17 @@ def test_resume_parser_rejects_ambiguous_session_ids() -> None:
 def test_rewrite_rejects_missing_managed_value() -> None:
     with pytest.raises(ValueError, match="requires"):
         rewrite_managed_args(["--model"], model="new", reasoning_effort="high")
+
+
+def test_qualification_hook_override_is_non_trusting_and_idempotent() -> None:
+    original = ["resume", "session", "--no-alt-screen"]
+    result = disable_hooks_for_qualification(original)
+    assert result == [*original, "--disable", "hooks"]
+    assert disable_hooks_for_qualification(result) == result
+    assert original == ["resume", "session", "--no-alt-screen"]
+
+
+@pytest.mark.parametrize("enabled", [["--enable", "hooks"], ["--enable=hooks"]])
+def test_qualification_hook_override_rejects_upstream_conflict(enabled: list[str]) -> None:
+    with pytest.raises(ValueError, match="explicitly enabled"):
+        disable_hooks_for_qualification(["resume", "session", *enabled])

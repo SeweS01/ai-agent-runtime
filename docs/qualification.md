@@ -21,6 +21,15 @@ Required blocking gates include:
 Failure of a gate blocks the release. It does not authorize a Telegram Agent patch,
 overlay, `.pth` shadowing, a silent UX change, or unmanaged Codex fallback.
 
+For a staging-only diagnostic of Codex's hook-consent startup screen,
+`[policy] qualification_disable_codex_hooks = true` makes the wrapper add the
+real Codex CLI's `--disable hooks` flag to new managed launches. It never
+trusts or executes unapproved hooks and leaves existing Codex processes
+unchanged. Runtime status exposes `qualification_only.codex_hooks_disabled`;
+the deployment audit rejects this setting for a production target. A PASS with
+hooks disabled proves only that this startup modal was absent, not that normal
+first-launch delivery or the production release is qualified.
+
 ## Exact release qualification manifest
 
 Every real harness writes one JSON evidence artifact for its gate. Evidence must be

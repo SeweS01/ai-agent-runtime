@@ -54,3 +54,17 @@ def test_control_plane_stale_window_is_bounded(tmp_path: Path, value: float) -> 
 def test_tmux_tmpdir_defaults_beside_runtime_socket() -> None:
     config = RuntimeConfig.defaults()
     assert config.effective_tmux_tmpdir == config.socket_path.parent / "tmux"
+
+
+def test_qualification_disable_hooks_requires_boolean(tmp_path: Path) -> None:
+    config_path = tmp_path / "runtime.toml"
+    config_path.write_text(
+        '[policy]\nqualification_disable_codex_hooks = "true"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="qualification_disable_codex_hooks must be a boolean"):
+        RuntimeConfig.load(config_path)
+
+
+def test_qualification_disable_hooks_defaults_off() -> None:
+    assert RuntimeConfig.defaults().qualification_disable_codex_hooks is False

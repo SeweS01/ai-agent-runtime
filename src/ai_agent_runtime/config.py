@@ -42,6 +42,7 @@ class RuntimeConfig:
     retirement_enabled: bool = False
     retirement_qualification_report_id: str = ""
     control_plane_stale_after_seconds: float = 60.0
+    qualification_disable_codex_hooks: bool = False
 
     @classmethod
     def defaults(cls) -> RuntimeConfig:
@@ -67,6 +68,7 @@ class RuntimeConfig:
             retirement_enabled=False,
             retirement_qualification_report_id="",
             control_plane_stale_after_seconds=60.0,
+            qualification_disable_codex_hooks=False,
         )
 
     @classmethod
@@ -84,6 +86,9 @@ class RuntimeConfig:
         retirement_enabled = policy.get("retirement_enabled", False)
         if not isinstance(retirement_enabled, bool):
             raise ValueError("policy.retirement_enabled must be a boolean")
+        qualification_disable_codex_hooks = policy.get("qualification_disable_codex_hooks", False)
+        if not isinstance(qualification_disable_codex_hooks, bool):
+            raise ValueError("policy.qualification_disable_codex_hooks must be a boolean")
         return cls(
             agent_instance_id=str(runtime.get("agent_instance_id", "")),
             forum_chat_id=int(runtime.get("forum_chat_id", 0)),
@@ -118,6 +123,7 @@ class RuntimeConfig:
             control_plane_stale_after_seconds=float(
                 policy.get("control_plane_stale_after_seconds", 60.0)
             ),
+            qualification_disable_codex_hooks=qualification_disable_codex_hooks,
         )
 
     def validate(self) -> None:

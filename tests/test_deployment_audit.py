@@ -341,6 +341,24 @@ def test_deployment_audit_blocks_unqualified_release(tmp_path: Path) -> None:
     assert "release_not_qualified" in report["errors"]
 
 
+def test_production_audit_rejects_qualification_only_disabled_hooks(tmp_path: Path) -> None:
+    instance = _instance(tmp_path)
+    config_path = Path(instance["runtime_config"])
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "\nqualification_disable_codex_hooks = true\n",
+        encoding="utf-8",
+    )
+    path = _manifest(tmp_path, [instance], target="production")
+    report = audit_deployment_manifest(
+        path,
+        qualification_verifier=_verifier_for,
+        rollback_verifier=_rollback_verified,
+        git_head_reader=lambda _path: "0" * 40,
+    )
+    assert report["accepted"] is False
+    assert "agent-1:qualification_codex_hooks_disabled" in report["errors"]
+
+
 def test_staging_audit_accepts_intact_tuple_with_only_real_evidence_missing(
     tmp_path: Path,
 ) -> None:

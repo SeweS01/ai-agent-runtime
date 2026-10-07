@@ -161,6 +161,7 @@ def _check_service_properties(
 def _audit_instance(
     raw: object,
     *,
+    target: object,
     tuple_data: dict[str, object],
     install_verification: dict[str, object],
     git_head_reader: GitHeadReader,
@@ -193,6 +194,8 @@ def _audit_instance(
         errors.append(f"{instance_id}:runtime_config_namespace_mismatch")
     if config.forum_chat_id != forum_chat_id:
         errors.append(f"{instance_id}:runtime_config_forum_mismatch")
+    if target == "production" and config.qualification_disable_codex_hooks:
+        errors.append(f"{instance_id}:qualification_codex_hooks_disabled")
     if config.upstream_sha != tuple_data.get("telegram_agent_sha"):
         errors.append(f"{instance_id}:upstream_tuple_mismatch")
     if config.real_codex_version != tuple_data.get("codex_version"):
@@ -349,6 +352,7 @@ def audit_deployment_manifest(
     for raw in raw_instances:
         instance, instance_errors = _audit_instance(
             raw,
+            target=target,
             tuple_data=tuple_data,
             install_verification=install_verification,
             git_head_reader=git_head_reader,

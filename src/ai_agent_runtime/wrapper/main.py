@@ -25,6 +25,7 @@ from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.process_safety import proc_starttime
 from ai_agent_runtime.providers.codex.argv import (
     InvocationKind,
+    disable_hooks_for_qualification,
     parse_invocation,
     rewrite_managed_args,
 )
@@ -478,6 +479,10 @@ def run(argv: list[str]) -> int:
         model=str(spec["model"]),
         reasoning_effort=str(spec["reasoning_effort"]),
     )
+    if config.qualification_disable_codex_hooks:
+        # Qualification-only isolation of Codex hook consent UI. Never trust
+        # hooks automatically and never use this setting for production.
+        managed_argv = disable_hooks_for_qualification(managed_argv)
     environment = dict(os.environ)
     environment["CODEX_HOME"] = str(spec["codex_home"])
     response["tmux_pane"] = pane
