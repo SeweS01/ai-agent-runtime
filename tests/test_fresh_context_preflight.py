@@ -33,6 +33,9 @@ def _inputs(tmp_path: Path) -> tuple[RuntimeConfig, dict[str, object], dict[str,
         "inventory_digest": "sha256:" + "2" * 64,
         "topics": [
             {
+                "source_ref": "agent-1/-1001/42",
+                "agent_instance_id": "agent-1",
+                "chat_id": -1001,
                 "thread_id": 42,
                 "name": "Existing topic",
                 "canonical_cwd": str(tmp_path / "projects" / "existing"),
@@ -51,11 +54,14 @@ def _inputs(tmp_path: Path) -> tuple[RuntimeConfig, dict[str, object], dict[str,
         "accepted": True,
         "entries": [
             {
+                "source_ref": "agent-1/-1001/42",
                 "status": "READY",
                 "identity": {
                     "agent_instance_id": "agent-1",
                     "chat_id": -1001,
                     "thread_id": 42,
+                    "topic_name": "Existing topic",
+                    "canonical_cwd": str(tmp_path / "projects" / "existing"),
                 },
             }
         ],
@@ -169,6 +175,30 @@ def test_fresh_context_preflight_rejects_unverified_tmux_and_plan(tmp_path: Path
     assert report["issues"] == ["TARGET_TMUX_SERVER_UNVERIFIED"]
     plan["accepted"] = False
     with pytest.raises(InventoryError, match="accepted baseline-bound plan"):
+        build_fresh_context_preflight(
+            config, baseline=baseline, binding_plan=plan, live_tmux=_no_server()
+        )
+
+
+@pytest.mark.parametrize("change", ["omitted", "duplicated", "identity_mismatch"])
+def test_fresh_context_preflight_rejects_invalid_plan_coverage(
+    tmp_path: Path, change: str
+) -> None:
+    config, baseline, plan = _inputs(tmp_path)
+    entries = plan["entries"]
+    assert isinstance(entries, list)
+    if change == "omitted":
+        entries.clear()
+    elif change == "duplicated":
+        entries.append(dict(entries[0]))
+    else:
+        identity = dict(entries[0]["identity"])
+        identity["topic_name"] = "Wrong topic"
+        entries[0]["identity"] = identity
+    plan["plan_digest"] = _digest(
+        {key: value for key, value in plan.items() if key != "plan_digest"}
+    )
+    with pytest.raises(InventoryError, match="binding plan"):
         build_fresh_context_preflight(
             config, baseline=baseline, binding_plan=plan, live_tmux=_no_server()
         )

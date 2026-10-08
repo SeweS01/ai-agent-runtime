@@ -53,11 +53,23 @@ def build_fresh_context_preflight(
     baseline_topics = baseline.get("topics")
     if not isinstance(baseline_topics, list):
         raise InventoryError("baseline topics are malformed")
-    baseline_by_thread = {
-        topic.get("thread_id"): topic
-        for topic in baseline_topics
-        if isinstance(topic, dict) and type(topic.get("thread_id")) is int
-    }
+    baseline_by_ref: dict[str, dict[str, object]] = {}
+    baseline_by_thread: dict[int, dict[str, object]] = {}
+    for topic in baseline_topics:
+        if not isinstance(topic, dict):
+            raise InventoryError("baseline topic is malformed")
+        source_ref = topic.get("source_ref")
+        thread_id = topic.get("thread_id")
+        if (
+            not isinstance(source_ref, str)
+            or not source_ref
+            or type(thread_id) is not int
+            or source_ref in baseline_by_ref
+            or thread_id in baseline_by_thread
+        ):
+            raise InventoryError("baseline topic identity is missing or duplicate")
+        baseline_by_ref[source_ref] = topic
+        baseline_by_thread[thread_id] = topic
 
     issues: list[str] = []
     if config.tmux_tmpdir is None:
@@ -71,21 +83,44 @@ def build_fresh_context_preflight(
     ).resolve(strict=False):
         issues.append("LEGACY_TOPIC_CONFIG_PATH_REUSED")
     retained_threads: set[int] = set()
+    seen_source_refs: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
             raise InventoryError("binding plan entry is malformed")
-        if entry.get("status") == "EXCLUDED":
-            continue
+        source_ref = entry.get("source_ref")
+        status = entry.get("status")
         identity = entry.get("identity")
         if (
-            not isinstance(identity, dict)
-            or identity.get("agent_instance_id") != config.agent_instance_id
+            not isinstance(source_ref, str)
+            or source_ref not in baseline_by_ref
+            or source_ref in seen_source_refs
+            or status not in {"READY", "UNMANAGED", "EXCLUDED"}
+            or not isinstance(identity, dict)
+        ):
+            raise InventoryError("binding plan contains a missing, duplicate or invalid topic")
+        seen_source_refs.add(source_ref)
+        baseline_topic = baseline_by_ref[source_ref]
+        for identity_field, baseline_field in (
+            ("agent_instance_id", "agent_instance_id"),
+            ("chat_id", "chat_id"),
+            ("thread_id", "thread_id"),
+            ("topic_name", "name"),
+            ("canonical_cwd", "canonical_cwd"),
+        ):
+            if identity.get(identity_field) != baseline_topic.get(baseline_field):
+                raise InventoryError("binding plan topic identity differs from baseline")
+        if status == "EXCLUDED":
+            continue
+        if (
+            identity.get("agent_instance_id") != config.agent_instance_id
             or identity.get("chat_id") != config.forum_chat_id
             or type(identity.get("thread_id")) is not int
         ):
             issues.append("RETAINED_BINDING_TARGET_INSTANCE_MISMATCH")
             continue
         retained_threads.add(identity["thread_id"])
+    if seen_source_refs != set(baseline_by_ref):
+        raise InventoryError("binding plan does not cover baseline topics exactly")
 
     topic_path = config.topic_config_path
     topic_evidence: dict[str, object]
