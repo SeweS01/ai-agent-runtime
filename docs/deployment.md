@@ -33,6 +33,9 @@ the instance-named wrapper config reachable under the new `HOME` because pinned
 upstream strips arbitrary environment variables from provider launches. The
 Runtime daemon projects only rollout-file links from verified account profiles;
 it never merges profile homes or changes the user's existing `~/.codex` tree.
+When Codex archives a rollout, reconciliation removes only the now-broken
+generated view link after verifying its target is under a configured profile's
+`sessions` tree. Foreign or still-live links fail closed and are never deleted.
 The service's `HOME`, view link, profile set, fresh rollout discovery, resume,
 archive lifecycle, and rollback topology must be qualified together. A single
 successful Telegram response is not a full storage-lifecycle qualification.

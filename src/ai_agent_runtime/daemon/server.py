@@ -1604,7 +1604,9 @@ class RuntimeServer:
                 raise SessionViewError("effective account profile identity mismatch")
             profiles[spec.account_profile] = home
         if profiles:
-            project_session_transcripts(profiles=profiles, view_root=view_root)
+            result = project_session_transcripts(profiles=profiles, view_root=view_root)
+            if result.removed:
+                logger.info("Pruned %d archived transcript links from session view", result.removed)
         self._session_view_error = None
 
     async def _session_view_loop(self) -> None:
@@ -1800,9 +1802,7 @@ class RuntimeServer:
                 pass
             await asyncio.sleep(self.evidence_interval)
 
-    def _revoke_stale_applied_evidence(
-        self, states: tuple[UpstreamTmuxState, ...]
-    ) -> None:
+    def _revoke_stale_applied_evidence(self, states: tuple[UpstreamTmuxState, ...]) -> None:
         """Do not keep a previous rollout attached to a newly respawned child."""
 
         for target in self.store.rollout_observation_targets():

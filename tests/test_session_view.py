@@ -102,6 +102,45 @@ def test_existing_unrelated_target_is_never_replaced(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "other user's data"
 
 
+def test_archived_rollout_removes_only_its_broken_view_link(tmp_path: Path) -> None:
+    profile = tmp_path / "a"
+    profile.mkdir(mode=0o700)
+    archived_rollout = _rollout(profile, "archived")
+    live_rollout = _rollout(profile, "live")
+    view = tmp_path / "view"
+    view.mkdir(mode=0o700)
+    project_session_transcripts(profiles={"a": profile}, view_root=view)
+    archived_link = view / "2026/10/05" / archived_rollout.name
+    live_link = view / "2026/10/05" / live_rollout.name
+    archive = profile / "archived_sessions"
+    archive.mkdir(mode=0o700)
+    archived_target = archive / archived_rollout.name
+    archived_rollout.rename(archived_target)
+
+    result = project_session_transcripts(profiles={"a": profile}, view_root=view)
+
+    assert result.sources == result.existing == 1
+    assert result.added == 0
+    assert result.removed == 1
+    assert not archived_link.exists() and not archived_link.is_symlink()
+    assert archived_target.is_file()
+    assert live_link.resolve() == live_rollout
+
+
+def test_foreign_broken_view_link_is_not_removed(tmp_path: Path) -> None:
+    profile = tmp_path / "a"
+    profile.mkdir(mode=0o700)
+    view = tmp_path / "view"
+    target = view / "2026/10/05/rollout-2026-10-05T13-00-00-foreign.jsonl"
+    target.parent.mkdir(parents=True, mode=0o700)
+    target.symlink_to(tmp_path / "foreign" / target.name)
+
+    with pytest.raises(SessionViewError, match="untracked transcript view link"):
+        project_session_transcripts(profiles={"a": profile}, view_root=view)
+
+    assert target.is_symlink()
+
+
 def test_symlinked_profile_sessions_are_refused(tmp_path: Path) -> None:
     profile = tmp_path / "a"
     profile.mkdir(mode=0o700)

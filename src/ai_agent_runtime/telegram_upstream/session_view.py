@@ -28,6 +28,7 @@ class SessionViewResult:
     sources: int
     added: int
     existing: int
+    removed: int = 0
 
 
 def _owned_directory(path: Path, *, label: str, private: bool = False) -> None:
@@ -94,6 +95,46 @@ def _preflight_view_parent(root: Path, relative: Path) -> None:
         _owned_directory(current, label="transcript view directory", private=True)
 
 
+def _stale_view_links(
+    *, view_root: Path, planned: dict[Path, Path], profiles: dict[str, Path]
+) -> list[Path]:
+    """Find only broken rollout links previously generated from known profiles.
+
+    A real Codex archive moves a rollout out of ``sessions``. Its old view link
+    must disappear too, but a foreign or still-live link must never be removed.
+    """
+
+    stale: list[Path] = []
+    for target in view_root.glob("*/*/*/rollout-*.jsonl"):
+        relative = target.relative_to(view_root)
+        if (
+            len(relative.parts) != 4
+            or not all(_DATE_PART.fullmatch(part) for part in relative.parts[:3])
+            or not _ROLLOUT_NAME.fullmatch(relative.name)
+        ):
+            continue
+        _preflight_view_parent(view_root, relative)
+        if relative in planned:
+            continue
+        try:
+            metadata = target.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISLNK(metadata.st_mode):
+            raise SessionViewError(f"untracked transcript view target: {target}")
+        link = os.readlink(target)
+        expected_sources = {str(profile / "sessions" / relative) for profile in profiles.values()}
+        if link not in expected_sources:
+            raise SessionViewError(f"untracked transcript view link: {target}")
+        source = Path(link)
+        if source.exists() or source.is_symlink():
+            raise SessionViewError(f"untracked live transcript view link: {target}")
+        stale.append(target)
+        if len(stale) > _MAX_ROLLOUTS:
+            raise SessionViewError("stale rollout view exceeds file limit")
+    return stale
+
+
 def project_session_transcripts(*, profiles: dict[str, Path], view_root: Path) -> SessionViewResult:
     """Expose rollout files to one upstream instance without merging account homes.
 
@@ -135,6 +176,8 @@ def project_session_transcripts(*, profiles: dict[str, Path], view_root: Path) -
             raise SessionViewError(f"transcript view target collision: {target}")
         existing += 1
 
+    stale = _stale_view_links(view_root=view_root, planned=planned, profiles=profiles)
+
     added = 0
     for relative, source in planned.items():
         parent = _view_parent(view_root, relative)
@@ -146,4 +189,17 @@ def project_session_transcripts(*, profiles: dict[str, Path], view_root: Path) -
         except FileExistsError as exc:
             raise SessionViewError(f"transcript view target changed: {target}") from exc
         added += 1
-    return SessionViewResult(sources=len(planned), added=added, existing=existing)
+    removed = 0
+    for target in stale:
+        relative = target.relative_to(view_root)
+        expected_sources = {str(profile / "sessions" / relative) for profile in profiles.values()}
+        try:
+            if not target.is_symlink() or os.readlink(target) not in expected_sources:
+                raise SessionViewError(f"stale transcript view link changed: {target}")
+            if target.exists():
+                continue
+            target.unlink()
+        except FileNotFoundError:
+            continue
+        removed += 1
+    return SessionViewResult(sources=len(planned), added=added, existing=existing, removed=removed)
