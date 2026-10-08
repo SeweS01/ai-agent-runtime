@@ -338,16 +338,24 @@ class RuntimeServer:
                 not in {"heartbeat", "control_plane_heartbeat", "status", "outbox_pull"},
             )
             await write_frame(writer, response)
+        except (ConnectionError, TimeoutError):
+            # The peer may have timed out or disconnected while a response was
+            # being prepared. There is no recipient for an error frame; trying
+            # to write one only creates another broken-pipe exception.
+            pass
         except RuntimeFailureError as exc:
-            await write_frame(writer, self._error(request_id, exc.code, exc.detail))
+            with contextlib.suppress(ConnectionError, TimeoutError):
+                await write_frame(writer, self._error(request_id, exc.code, exc.detail))
         except (ValueError, KeyError, OSError) as exc:
-            await write_frame(
-                writer,
-                self._error(request_id, ErrorCode.INVALID_REQUEST, str(exc)),
-            )
+            with contextlib.suppress(ConnectionError, TimeoutError):
+                await write_frame(
+                    writer,
+                    self._error(request_id, ErrorCode.INVALID_REQUEST, str(exc)),
+                )
         finally:
             writer.close()
-            await writer.wait_closed()
+            with contextlib.suppress(ConnectionError, OSError):
+                await writer.wait_closed()
 
     def _validate_peer(self, writer: asyncio.StreamWriter) -> tuple[int, int]:
         transport_socket = writer.get_extra_info("socket")
