@@ -334,7 +334,8 @@ class RuntimeServer:
                 request_id,
                 request_digest,
                 response,
-                durable=action not in {"heartbeat", "control_plane_heartbeat", "status"},
+                durable=action
+                not in {"heartbeat", "control_plane_heartbeat", "status", "outbox_pull"},
             )
             await write_frame(writer, response)
         except RuntimeFailureError as exc:

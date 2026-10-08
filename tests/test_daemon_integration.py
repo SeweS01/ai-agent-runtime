@@ -704,7 +704,13 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     )
     assert synced_status["status"]["control_plane_sync"]["state"] == "IN_SYNC"
     assert synced_status["status"]["bindings"][0]["health"] == "RUNTIME_HEALTHY"
-    assert durable_result_count() == 3  # status and control-plane polls are repeatable
+    empty_pull = await request(
+        config.socket_path,
+        versioned("outbox_pull", str(uuid.uuid4()), limit=50),
+    )
+    assert empty_pull["ok"] is True
+    assert empty_pull["events"] == []
+    assert durable_result_count() == 3  # repeatable polls never grow the durable cache
 
     topic_config.write_text(
         json.dumps(

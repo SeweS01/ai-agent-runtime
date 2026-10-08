@@ -14,10 +14,12 @@ own 2-second outer deadline.
 Successful mutating responses are stored durably with a digest of the request. A
 retry using the same ID and payload returns the original outcome, including after a
 daemon restart. Reusing an ID with a different payload is rejected.
-`heartbeat`, `control_plane_heartbeat`, and `status` are safe to repeat and use
-only the daemon's bounded in-memory cache; their responses are not appended to
-the durable idempotency table on every poll. After a daemon restart, replaying
-one of these requests may refresh the lease or return a newer status snapshot.
+`heartbeat`, `control_plane_heartbeat`, `status`, and `outbox_pull` use only
+the daemon's bounded in-memory cache; their responses are not appended to the
+durable idempotency table on every poll. After a daemon restart, replaying one
+may refresh the lease, return a newer status snapshot, or re-read an outbox
+event on its next retry. Outbox event IDs and CUS receipts provide durable
+delivery idempotency; an unacknowledged event remains in the outbox.
 
 ## Wrapper actions
 
