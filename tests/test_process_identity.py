@@ -108,6 +108,7 @@ def test_wrapper_identity_accepts_sanitized_tmux_environment(
     assert observed == [socket_path]
 
 
+@pytest.mark.usefixtures("allow_hosted_runner_python")
 def test_process_executable_evidence_is_digest_bound() -> None:
     evidence = process_executable_evidence(os.getpid())
     assert evidence["inode"] > 0

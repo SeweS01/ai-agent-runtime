@@ -20,6 +20,7 @@ from ai_agent_runtime.telegram_upstream import topic_config as topic_config_adap
 from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
 
+@pytest.mark.usefixtures("allow_hosted_runner_python")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("switched_name", [False, True])
 @pytest.mark.parametrize("config_changed", [False, True])
@@ -188,6 +189,7 @@ async def test_clear_waits_for_new_upstream_state(
     assert verified["session_id"] is None
 
 
+@pytest.mark.usefixtures("allow_hosted_runner_python")
 def test_resume_requires_same_binding_even_with_same_cwd_and_account(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir(mode=0o700)
@@ -308,6 +310,7 @@ def test_resume_requires_same_binding_even_with_same_cwd_and_account(tmp_path: P
         daemon.store.close()
 
 
+@pytest.mark.usefixtures("allow_hosted_runner_python")
 @pytest.mark.asyncio
 async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     project = tmp_path / "project"

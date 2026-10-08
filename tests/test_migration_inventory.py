@@ -329,6 +329,7 @@ def test_inventory_exports_only_sanitized_live_account_evidence(
     }
 
 
+@pytest.mark.usefixtures("allow_hosted_runner_python")
 def test_live_account_observation_proves_process_profile_and_binary(tmp_path: Path) -> None:
     config = _config(tmp_path)
     project = config.allowed_project_roots[0] / "live"
