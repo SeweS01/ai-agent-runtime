@@ -21,6 +21,7 @@ from ai_agent_runtime.deployment.install import (
     verify_runtime_install_report,
 )
 from ai_agent_runtime.deployment.prepare import prepare_instance_links
+from ai_agent_runtime.deployment.switch import switch_instance_release
 from ai_agent_runtime.health.doctor import collect_doctor_report
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
@@ -533,6 +534,31 @@ def _deployment_prepare_instance(
     return 0
 
 
+def _deployment_switch_instance(
+    *,
+    old_install_report: str,
+    new_install_report: str,
+    agent_instance_id: str,
+    instance_link: str,
+    runtime_link: str,
+    wrapper_link: str,
+    intent: str,
+    result: str,
+) -> int:
+    report = switch_instance_release(
+        old_install_report=Path(old_install_report),
+        new_install_report=Path(new_install_report),
+        agent_instance_id=agent_instance_id,
+        instance_link=Path(instance_link),
+        runtime_link=Path(runtime_link),
+        wrapper_link=Path(wrapper_link),
+        intent_path=Path(intent),
+        result_path=Path(result),
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
 def main() -> None:
     default_config = os.environ.get(
         "AI_AGENT_RUNTIME_CONFIG",
@@ -649,6 +675,15 @@ def main() -> None:
     deployment_prepare.add_argument("--runtime-link", required=True)
     deployment_prepare.add_argument("--wrapper-link", required=True)
     deployment_prepare.add_argument("--output", required=True)
+    deployment_switch = deployment_commands.add_parser("switch-instance-release")
+    deployment_switch.add_argument("--old-install-report", required=True)
+    deployment_switch.add_argument("--new-install-report", required=True)
+    deployment_switch.add_argument("--agent-instance-id", required=True)
+    deployment_switch.add_argument("--instance-link", required=True)
+    deployment_switch.add_argument("--runtime-link", required=True)
+    deployment_switch.add_argument("--wrapper-link", required=True)
+    deployment_switch.add_argument("--intent", required=True)
+    deployment_switch.add_argument("--result", required=True)
     deployment_audit = deployment_commands.add_parser("audit")
     deployment_audit.add_argument("--manifest", required=True)
     deployment_audit.add_argument("--output")
@@ -760,6 +795,19 @@ def main() -> None:
                         runtime_link=namespace.runtime_link,
                         wrapper_link=namespace.wrapper_link,
                         output=namespace.output,
+                    )
+                )
+            if namespace.deployment_command == "switch-instance-release":
+                raise SystemExit(
+                    _deployment_switch_instance(
+                        old_install_report=namespace.old_install_report,
+                        new_install_report=namespace.new_install_report,
+                        agent_instance_id=namespace.agent_instance_id,
+                        instance_link=namespace.instance_link,
+                        runtime_link=namespace.runtime_link,
+                        wrapper_link=namespace.wrapper_link,
+                        intent=namespace.intent,
+                        result=namespace.result,
                     )
                 )
             if namespace.deployment_command == "audit":

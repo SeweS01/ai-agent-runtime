@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from ai_agent_runtime.deployment import prepare as preparation
+from ai_agent_runtime.deployment import switch as switching
 from ai_agent_runtime.deployment.install import INSTALL_REPORT_SCHEMA
 from ai_agent_runtime.migration.inventory import InventoryError, _digest, write_json_artifact
 
@@ -16,8 +17,8 @@ def _executable(path: Path) -> None:
     path.chmod(0o700)
 
 
-def _install_report(tmp_path: Path) -> tuple[Path, Path]:
-    release = tmp_path / "releases" / "runtime-1"
+def _install_report(tmp_path: Path, release_id: str = "runtime-1") -> tuple[Path, Path]:
+    release = tmp_path / "releases" / release_id
     runtime = release / "bin" / "ai-agent-runtime"
     wrapper = release / "bin" / "codex-wrapper"
     _executable(runtime)
@@ -43,7 +44,7 @@ def _install_report(tmp_path: Path) -> tuple[Path, Path]:
     report: dict[str, object] = {
         "schema": INSTALL_REPORT_SCHEMA,
         "status": "INSTALLED_NOT_ACTIVATED",
-        "release_id": "runtime-1",
+        "release_id": release_id,
         "release_path": str(release),
         "wheel_path": str(wheel),
         "wheel_sha256": f"sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}",
@@ -61,7 +62,7 @@ def _install_report(tmp_path: Path) -> tuple[Path, Path]:
         "production_cutover_authorized": False,
     }
     report["report_digest"] = _digest(report)
-    report_path = tmp_path / "install-report.json"
+    report_path = tmp_path / f"install-report-{release_id}.json"
     write_json_artifact(report_path, report)
     return report_path, release
 
@@ -131,3 +132,132 @@ def test_prepare_instance_links_rolls_back_only_new_links_on_failure(
     assert not instance.is_symlink()
     assert not runtime.is_symlink()
     assert not wrapper.is_symlink()
+
+
+def _prepared_switch(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
+    old_report, old_release = _install_report(tmp_path, "runtime-1")
+    new_report, new_release = _install_report(tmp_path, "runtime-2")
+    instance = tmp_path / "instances" / "ta_staging_01"
+    runtime = tmp_path / "bin" / "ai-agent-runtime@ta_staging_01"
+    wrapper = tmp_path / "bin" / "codex-wrapper@ta_staging_01"
+    preparation.prepare_instance_links(
+        install_report=old_report,
+        agent_instance_id="ta_staging_01",
+        instance_link=instance,
+        runtime_link=runtime,
+        wrapper_link=wrapper,
+    )
+    return old_report, new_report, old_release, new_release, instance, runtime, wrapper
+
+
+def test_switch_instance_release_preserves_stable_entrypoints_and_can_reverse(
+    tmp_path: Path,
+) -> None:
+    old, new, old_release, new_release, instance, runtime, wrapper = _prepared_switch(tmp_path)
+    result = switching.switch_instance_release(
+        old_install_report=old,
+        new_install_report=new,
+        agent_instance_id="ta_staging_01",
+        instance_link=instance,
+        runtime_link=runtime,
+        wrapper_link=wrapper,
+        intent_path=tmp_path / "switch-intent.json",
+        result_path=tmp_path / "switch-result.json",
+    )
+    assert result["status"] == "SWITCHED_NOT_RESTARTED"
+    assert result["services_restarted"] is False
+    assert result["production_cutover_authorized"] is False
+    assert instance.resolve(strict=True) == new_release
+    assert runtime.resolve(strict=True) == new_release / "bin/ai-agent-runtime"
+    assert wrapper.resolve(strict=True) == new_release / "bin/codex-wrapper"
+    assert (tmp_path / "switch-intent.json").is_file()
+    assert (tmp_path / "switch-result.json").is_file()
+
+    switching.switch_instance_release(
+        old_install_report=new,
+        new_install_report=old,
+        agent_instance_id="ta_staging_01",
+        instance_link=instance,
+        runtime_link=runtime,
+        wrapper_link=wrapper,
+        intent_path=tmp_path / "rollback-intent.json",
+        result_path=tmp_path / "rollback-result.json",
+    )
+    assert instance.resolve(strict=True) == old_release
+
+
+def test_switch_instance_release_fails_before_mutation_if_link_drifted(tmp_path: Path) -> None:
+    old, new, old_release, _new_release, instance, runtime, wrapper = _prepared_switch(tmp_path)
+    wrapper.unlink()
+    wrapper.symlink_to(old_release / "bin/codex-wrapper")
+    with pytest.raises(InventoryError, match="differs"):
+        switching.switch_instance_release(
+            old_install_report=old,
+            new_install_report=new,
+            agent_instance_id="ta_staging_01",
+            instance_link=instance,
+            runtime_link=runtime,
+            wrapper_link=wrapper,
+            intent_path=tmp_path / "switch-intent.json",
+            result_path=tmp_path / "switch-result.json",
+        )
+    assert instance.resolve(strict=True) == old_release
+    assert not (tmp_path / "switch-intent.json").exists()
+
+
+def test_switch_instance_release_rolls_back_on_failed_result_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old, new, old_release, _new_release, instance, runtime, wrapper = _prepared_switch(tmp_path)
+    original_write = switching.write_json_artifact
+
+    def fail_result(path: Path, payload: dict[str, object]) -> None:
+        if path.name == "switch-result.json":
+            raise OSError("simulated result write failure")
+        original_write(path, payload)
+
+    monkeypatch.setattr(switching, "write_json_artifact", fail_result)
+    with pytest.raises(OSError, match="simulated"):
+        switching.switch_instance_release(
+            old_install_report=old,
+            new_install_report=new,
+            agent_instance_id="ta_staging_01",
+            instance_link=instance,
+            runtime_link=runtime,
+            wrapper_link=wrapper,
+            intent_path=tmp_path / "switch-intent.json",
+            result_path=tmp_path / "switch-result.json",
+        )
+    assert instance.resolve(strict=True) == old_release
+    assert (tmp_path / "switch-intent.json").is_file()
+    assert not (tmp_path / "switch-result.json").exists()
+
+
+def test_switch_instance_release_rolls_back_if_replace_raises_after_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old, new, old_release, _new_release, instance, runtime, wrapper = _prepared_switch(tmp_path)
+    original_replace = switching._replace_link
+    calls = 0
+
+    def fail_after_first_replace(link: Path, target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        original_replace(link, target)
+        if calls == 1:
+            raise OSError("simulated post-replace failure")
+
+    monkeypatch.setattr(switching, "_replace_link", fail_after_first_replace)
+    with pytest.raises(OSError, match="simulated"):
+        switching.switch_instance_release(
+            old_install_report=old,
+            new_install_report=new,
+            agent_instance_id="ta_staging_01",
+            instance_link=instance,
+            runtime_link=runtime,
+            wrapper_link=wrapper,
+            intent_path=tmp_path / "switch-intent.json",
+            result_path=tmp_path / "switch-result.json",
+        )
+    assert calls == 2
+    assert instance.resolve(strict=True) == old_release

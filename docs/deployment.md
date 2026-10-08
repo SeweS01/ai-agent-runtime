@@ -87,8 +87,32 @@ while modifying installed Python code or a harness therefore blocks activation.
 one instance link to the verified release and two stable, instance-named entrypoints
 through that link; it refuses to replace or upgrade any existing path. Its result is
 `PREPARED_NOT_STARTED`: no service is started/restarted and no production cutover is
-authorized. An upgrade of an existing instance requires a separately audited switch
-procedure rather than reusing this initial-preparation command.
+authorized. For an existing instance, install and verify the new release first, then
+switch only its stable release symlink with a separate, audited command:
+
+```bash
+ai-agent-runtime deployment switch-instance-release \
+  --old-install-report /srv/qualification/runtime-install-old.json \
+  --new-install-report /srv/qualification/runtime-install-new.json \
+  --agent-instance-id ta_staging_01 \
+  --instance-link /home/devops/.local/lib/ai-agent-runtime/instances/ta_staging_01 \
+  --runtime-link /home/devops/.local/bin/ai-agent-runtime@ta_staging_01 \
+  --wrapper-link /home/devops/.local/bin/codex-wrapper@ta_staging_01 \
+  --intent /srv/qualification/ta_staging_01-switch-intent.json \
+  --result /srv/qualification/ta_staging_01-switch-result.json
+```
+
+Both install reports must still verify against their wheels and installed files. The
+current instance link must point exactly at the old release; stable entrypoints must
+route through it. The command writes an immutable intent before an atomic symlink
+replacement, then verifies both entrypoints and writes an immutable result. A failed
+post-check restores the old link. It never restarts services, touches live tmux/child
+processes, or authorizes production cutover. Existing processes keep their executable;
+the operator must separately qualify and restart the daemon/Agent as appropriate.
+If the process is interrupted between intent and result, inspect the link and service
+state before any retry. To reverse a completed switch, run the same command with
+old/new install reports exchanged and fresh intent/result paths. Keep both release
+directories and reports until the rollback window closes.
 
 Capture the effective, secret-free deployment values in a digest-protected
 `ai-agent-runtime.deployment-manifest.v1` artifact. Each `--instance` file is a
