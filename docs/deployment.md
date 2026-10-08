@@ -254,6 +254,30 @@ create Runtime Bindings. This is a migration exclusion, not destructive cleanup 
 legacy files. Legacy `topic_config.json` and CUS artifacts remain available for
 rollback until the control period ends.
 
+Stage the **existing** topic configuration in the new AgentInstance's separate
+private directory before starting its upstream service. This creates only a new
+`0600` file; it never edits or replaces the legacy bot's live config. The source
+file must still match the baseline digest, and the resolved plan is replayed
+against the exact Owner decision artifact before an excluded topic is omitted:
+
+```bash
+ai-agent-runtime inventory stage-topic-config \
+  --baseline /var/lib/ai-agent-runtime/migration/pre-cutover.json \
+  --binding-plan /var/lib/ai-agent-runtime/migration/binding-plan-resolved.json \
+  --decisions /var/lib/ai-agent-runtime/migration/owner-decisions.json \
+  --target /srv/telegram-ai-agent-new/topic_config.json \
+  --output /var/lib/ai-agent-runtime/migration/topic-config-stage.json
+```
+
+The target and report parents must already be owned by the service user with
+mode `0700`, and neither target nor report may exist. The command preserves all unknown
+fields and every retained topic's name, cwd, engine and exec mode. Only exact
+`EXCLUDED` thread keys leave the staged copy; the source remains untouched.
+Its result is `STAGED_NOT_ACTIVATED`, not authorization to start production.
+If the source changes during staging, leave that candidate inactive, refresh M0
+and the Owner-bound plan, then stage to a new target path. Do not overwrite a
+candidate in place or delete it without a separate reversible cleanup manifest.
+
 The plan is evidence, not an apply command. Import it into CUS with the separately
 versioned `cus-runtime-migration-import` tool. Run that tool without `--commit` first;
 only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends one
@@ -276,7 +300,7 @@ values, then separately inspect process evidence before calling a live instance
 Applied; a local spec alone never proves actual Codex parameters.
 
 Use the read-only fresh-context guard against the **target** AgentInstance config
-after preparing its separate config/state namespace, immediately before cutover:
+after staging its separate config/state namespace, immediately before cutover:
 
 ```bash
 ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory fresh-context-preflight \

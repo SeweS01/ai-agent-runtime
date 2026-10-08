@@ -22,6 +22,9 @@ artifact/control period; do not delete or overwrite them as a shortcut. If a
 legacy session appears in the upstream `/resume` picker, its unknown binding
 provenance must be denied before Codex starts. Sessions created after cutover
 still require same-binding and same-account provenance for `/resume`.
+The new topic config is staged from a digest-matched legacy snapshot into a
+separate file; only explicitly Owner-approved deleted topics are omitted from
+that copy. The legacy config is not modified.
 The read-only `inventory fresh-context-preflight` command checks that the target
 namespace is separate and empty before activation; it never creates that state
 or authorizes cutover on its own.

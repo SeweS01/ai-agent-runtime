@@ -50,6 +50,7 @@ from ai_agent_runtime.migration.session_storage import (
     build_session_storage_manifest,
     stage_session_storage,
 )
+from ai_agent_runtime.migration.topic_config_stage import stage_topic_config
 from ai_agent_runtime.qualification.release_gate import (
     build_qualification_manifest,
     verify_qualification_manifest,
@@ -141,6 +142,34 @@ def _inventory_fresh_context_preflight(
         write_json_artifact(Path(output).expanduser(), report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["accepted"] else 1
+
+
+def _inventory_stage_topic_config(
+    *, baseline: str, binding_plan: str, decisions: str | None, target: str, output: str
+) -> int:
+    report_path = Path(output).expanduser()
+    target_path = Path(target).expanduser()
+    if report_path.resolve(strict=False) == target_path.resolve(strict=False):
+        raise InventoryError("topic-config stage report and target must be different paths")
+    report_parent = report_path.parent
+    if not report_path.is_absolute() or not report_parent.is_dir() or report_parent.is_symlink():
+        raise InventoryError("topic-config stage report needs an existing private directory")
+    report_parent_metadata = report_parent.stat()
+    if report_parent_metadata.st_uid != os.getuid() or report_parent_metadata.st_mode & 0o077:
+        raise InventoryError("topic-config stage report parent must be owned and mode 0700")
+    if report_path.exists() or report_path.is_symlink():
+        raise InventoryError("refusing to overwrite topic-config stage report")
+    report = stage_topic_config(
+        baseline=read_inventory(Path(baseline).expanduser()),
+        binding_plan=read_binding_migration_plan(Path(binding_plan).expanduser()),
+        decisions=(
+            read_binding_migration_decisions(Path(decisions).expanduser()) if decisions else None
+        ),
+        target=target_path,
+    )
+    write_json_artifact(report_path, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
 
 
 def _inventory_plan_bindings(
@@ -532,6 +561,12 @@ def main() -> None:
     fresh_preflight.add_argument("--baseline", required=True)
     fresh_preflight.add_argument("--binding-plan", required=True)
     fresh_preflight.add_argument("--output")
+    stage_topics = inventory_commands.add_parser("stage-topic-config")
+    stage_topics.add_argument("--baseline", required=True)
+    stage_topics.add_argument("--binding-plan", required=True)
+    stage_topics.add_argument("--decisions")
+    stage_topics.add_argument("--target", required=True)
+    stage_topics.add_argument("--output", required=True)
     inventory_plan = inventory_commands.add_parser("plan-bindings")
     inventory_plan.add_argument("--inventory", required=True)
     inventory_plan.add_argument("--generation-id", required=True)
@@ -751,6 +786,16 @@ def main() -> None:
                         generation_id=namespace.generation_id,
                         output=namespace.output,
                         decisions=namespace.decisions,
+                    )
+                )
+            if namespace.inventory_command == "stage-topic-config":
+                raise SystemExit(
+                    _inventory_stage_topic_config(
+                        baseline=namespace.baseline,
+                        binding_plan=namespace.binding_plan,
+                        decisions=namespace.decisions,
+                        target=namespace.target,
+                        output=namespace.output,
                     )
                 )
             if namespace.inventory_command == "plan-session-provenance":
