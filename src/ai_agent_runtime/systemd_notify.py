@@ -22,11 +22,17 @@ def notify(message: str) -> bool:
         notifier.close()
 
 
+def _watchdog_interval(raw_usec: str) -> float:
+    # Quarter deadline, capped at five seconds, leaves scheduling margin while
+    # still allowing systemd to detect an event loop blocked past its deadline.
+    return max(min(float(raw_usec) / 4_000_000, 5.0), 0.5)
+
+
 async def watchdog_loop() -> None:
     raw_interval = os.environ.get("WATCHDOG_USEC")
     if not raw_interval:
         return
-    interval = max(float(raw_interval) / 2_000_000, 0.5)
+    interval = _watchdog_interval(raw_interval)
     while True:
         await asyncio.sleep(interval)
         notify("WATCHDOG=1")
