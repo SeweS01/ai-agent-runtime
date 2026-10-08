@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,11 +17,103 @@ from ai_agent_runtime.migration import inventory as inventory_module
 from ai_agent_runtime.migration.binding_plan import build_binding_migration_plan
 from ai_agent_runtime.migration.inventory import (
     InventoryError,
+    _digest,
     build_inventory,
     compare_inventories,
     read_inventory,
     write_inventory,
 )
+
+
+def _profile_comparison_inputs() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    source_ref = "agent-1/-1001/42"
+    desired = {
+        "canonical_cwd": "/srv/project",
+        "provider": "codex",
+        "account_profile": "work",
+        "model": "gpt-test",
+        "reasoning_effort": "high",
+    }
+    baseline: dict[str, object] = {
+        "inventory_digest": "sha256:" + "1" * 64,
+        "topics": [
+            {
+                "source_ref": source_ref,
+                "name": "Existing topic",
+                "canonical_cwd": "/srv/project",
+                "engine": "codex",
+                "exec_mode": "tmux",
+            }
+        ],
+    }
+    candidate = deepcopy(baseline)
+    topic = candidate["topics"][0]  # type: ignore[index]
+    for field, spec_field in (("cus_bindings", "desired"), ("runtime_bindings", "effective")):
+        topic[field] = [  # type: ignore[index]
+            {
+                "binding_id": "binding-42",
+                "project_id": "project-42",
+                "canonical_cwd": "/srv/project",
+                **(
+                    {"lifecycle_status": "CONFIGURED"}
+                    if field == "cus_bindings"
+                    else {"configured": True, "management_mode": "MANAGED"}
+                ),
+                spec_field: deepcopy(desired),
+            }
+        ]
+    plan: dict[str, object] = {
+        "schema": "ai-agent-runtime.binding-migration-plan.v1",
+        "source_inventory_digest": baseline["inventory_digest"],
+        "accepted": True,
+        "entries": [
+            {
+                "source_ref": source_ref,
+                "status": "READY",
+                "binding_id": "binding-42",
+                "project_id": "project-42",
+                "desired": desired,
+            }
+        ],
+    }
+    plan["plan_digest"] = _digest(plan)
+    return baseline, candidate, plan
+
+
+def test_inventory_compare_with_plan_proves_topic_profile() -> None:
+    baseline, candidate, plan = _profile_comparison_inputs()
+    report = compare_inventories(baseline, candidate, binding_plan=plan)
+    assert report["accepted"] is True
+    assert report["binding_profile_issues"] == []
+
+
+def test_inventory_compare_with_plan_blocks_profile_drift() -> None:
+    baseline, candidate, plan = _profile_comparison_inputs()
+    topic = candidate["topics"][0]  # type: ignore[index]
+    topic["runtime_bindings"][0]["effective"]["model"] = "other"  # type: ignore[index]
+    report = compare_inventories(baseline, candidate, binding_plan=plan)
+    assert report["accepted"] is False
+    assert report["binding_profile_issues"] == [
+        {"source_ref": "agent-1/-1001/42", "code": "RUNTIME_BINDINGS_PROFILE_MISMATCH"}
+    ]
+
+
+def test_inventory_compare_with_plan_blocks_unmanaged_runtime() -> None:
+    baseline, candidate, plan = _profile_comparison_inputs()
+    topic = candidate["topics"][0]  # type: ignore[index]
+    topic["runtime_bindings"][0]["management_mode"] = "UNMANAGED"  # type: ignore[index]
+    report = compare_inventories(baseline, candidate, binding_plan=plan)
+    assert report["accepted"] is False
+    assert report["binding_profile_issues"] == [
+        {"source_ref": "agent-1/-1001/42", "code": "RUNTIME_BINDINGS_PROFILE_MISMATCH"}
+    ]
+
+
+def test_inventory_compare_rejects_stale_or_tampered_plan() -> None:
+    baseline, candidate, plan = _profile_comparison_inputs()
+    plan["source_inventory_digest"] = "sha256:" + "2" * 64
+    with pytest.raises(InventoryError, match="binding plan is not accepted"):
+        compare_inventories(baseline, candidate, binding_plan=plan)
 
 
 def test_live_tmux_parser_uses_unescaped_tab_separator(

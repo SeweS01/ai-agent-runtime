@@ -112,10 +112,15 @@ def _inventory_export(
     return 0
 
 
-def _inventory_compare(*, baseline: str, candidate: str, output: str | None) -> int:
+def _inventory_compare(
+    *, baseline: str, candidate: str, binding_plan: str | None, output: str | None
+) -> int:
     report = compare_inventories(
         read_inventory(Path(baseline).expanduser()),
         read_inventory(Path(candidate).expanduser()),
+        binding_plan=(
+            read_binding_migration_plan(Path(binding_plan).expanduser()) if binding_plan else None
+        ),
     )
     if output:
         write_json_artifact(Path(output).expanduser(), report)
@@ -134,9 +139,7 @@ def _inventory_plan_bindings(
         read_inventory(Path(inventory).expanduser()),
         generation_id=generation_id,
         decisions=(
-            read_binding_migration_decisions(Path(decisions).expanduser())
-            if decisions
-            else None
+            read_binding_migration_decisions(Path(decisions).expanduser()) if decisions else None
         ),
     )
     target = Path(output).expanduser()
@@ -508,6 +511,7 @@ def main() -> None:
     inventory_compare = inventory_commands.add_parser("compare")
     inventory_compare.add_argument("--baseline", required=True)
     inventory_compare.add_argument("--candidate", required=True)
+    inventory_compare.add_argument("--binding-plan")
     inventory_compare.add_argument("--output")
     inventory_plan = inventory_commands.add_parser("plan-bindings")
     inventory_plan.add_argument("--inventory", required=True)
@@ -519,9 +523,7 @@ def main() -> None:
     provenance_plan.add_argument("--binding-plan", required=True)
     provenance_plan.add_argument("--output", required=True)
     provenance = commands.add_parser("provenance")
-    provenance_commands = provenance.add_subparsers(
-        dest="provenance_command", required=True
-    )
+    provenance_commands = provenance.add_subparsers(dest="provenance_command", required=True)
     provenance_import = provenance_commands.add_parser("import")
     provenance_import.add_argument("--plan", required=True)
     storage = commands.add_parser("storage")
@@ -719,6 +721,7 @@ def main() -> None:
                     _inventory_compare(
                         baseline=namespace.baseline,
                         candidate=namespace.candidate,
+                        binding_plan=namespace.binding_plan,
                         output=namespace.output,
                     )
                 )
@@ -750,9 +753,7 @@ def main() -> None:
         if namespace.command == "doctor":
             raise SystemExit(asyncio.run(_doctor(config)))
         if namespace.command == "provenance" and namespace.provenance_command == "import":
-            raise SystemExit(
-                asyncio.run(_provenance_import(config, plan_path=namespace.plan))
-            )
+            raise SystemExit(asyncio.run(_provenance_import(config, plan_path=namespace.plan)))
         if namespace.command == "inventory" and namespace.inventory_command == "export":
             raise SystemExit(
                 _inventory_export(

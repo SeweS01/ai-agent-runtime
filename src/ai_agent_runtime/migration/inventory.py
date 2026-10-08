@@ -706,6 +706,8 @@ def _topic_index(inventory: dict[str, object]) -> tuple[dict[str, dict[str, obje
 def compare_inventories(
     baseline: dict[str, object],
     candidate: dict[str, object],
+    *,
+    binding_plan: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Compare stable topic routing fields for migration acceptance."""
 
@@ -726,6 +728,77 @@ def compare_inventories(
         }
         if changes:
             field_changes.append({"source_ref": source_ref, "changes": changes})
+    profile_issues: list[dict[str, str]] = []
+    if binding_plan is not None:
+        if (
+            binding_plan.get("schema") != "ai-agent-runtime.binding-migration-plan.v1"
+            or binding_plan.get("source_inventory_digest") != baseline.get("inventory_digest")
+            or binding_plan.get("accepted") is not True
+            or binding_plan.get("plan_digest")
+            != _digest({key: value for key, value in binding_plan.items() if key != "plan_digest"})
+        ):
+            raise InventoryError(
+                "binding plan is not accepted or does not match baseline inventory"
+            )
+        entries = binding_plan.get("entries")
+        if not isinstance(entries, list):
+            raise InventoryError("binding plan entries are malformed")
+        planned_sources: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("source_ref"), str):
+                raise InventoryError("binding plan entry is malformed")
+            source_ref = entry["source_ref"]
+            if source_ref in planned_sources:
+                raise InventoryError("binding plan has duplicate source refs")
+            planned_sources.add(source_ref)
+            if entry.get("status") != "READY":
+                continue
+            expected = entry.get("desired")
+            topic = candidate_topics.get(source_ref)
+            if not isinstance(expected, dict) or topic is None:
+                profile_issues.append(
+                    {"source_ref": source_ref, "code": "READY_TOPIC_OR_SPEC_MISSING"}
+                )
+                continue
+            for field, spec_field in (
+                ("cus_bindings", "desired"),
+                ("runtime_bindings", "effective"),
+            ):
+                records = topic.get(field)
+                if (
+                    not isinstance(records, list)
+                    or len(records) != 1
+                    or not isinstance(records[0], dict)
+                ):
+                    profile_issues.append(
+                        {"source_ref": source_ref, "code": f"{field.upper()}_MISSING_OR_AMBIGUOUS"}
+                    )
+                    continue
+                record = records[0]
+                observed = record.get(spec_field)
+                if (
+                    record.get("binding_id") != entry.get("binding_id")
+                    or record.get("project_id") != entry.get("project_id")
+                    or record.get("canonical_cwd") != expected.get("canonical_cwd")
+                    or (field == "cus_bindings" and record.get("lifecycle_status") != "CONFIGURED")
+                    or (
+                        field == "runtime_bindings"
+                        and (
+                            record.get("configured") is not True
+                            or record.get("management_mode") != "MANAGED"
+                        )
+                    )
+                    or not isinstance(observed, dict)
+                    or any(
+                        observed.get(key) != expected.get(key)
+                        for key in ("provider", "account_profile", "model", "reasoning_effort")
+                    )
+                ):
+                    profile_issues.append(
+                        {"source_ref": source_ref, "code": f"{field.upper()}_PROFILE_MISMATCH"}
+                    )
+        if planned_sources != set(base_topics):
+            raise InventoryError("binding plan does not cover baseline source refs")
     blocking = bool(
         missing
         or added
@@ -734,6 +807,7 @@ def compare_inventories(
         or candidate_duplicates
         or candidate.get("invalid_topic_keys")
         or candidate.get("orphan_tmux_states")
+        or profile_issues
     )
     report: dict[str, object] = {
         "schema": COMPARISON_SCHEMA,
@@ -743,6 +817,7 @@ def compare_inventories(
         "missing_source_refs": missing,
         "unexpected_source_refs": added,
         "field_changes": field_changes,
+        "binding_profile_issues": profile_issues,
         "baseline_duplicate_source_refs": base_duplicates,
         "candidate_duplicate_source_refs": candidate_duplicates,
         "candidate_invalid_topic_keys": candidate.get("invalid_topic_keys", []),

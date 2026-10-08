@@ -199,6 +199,7 @@ compare the stable routing fields:
 ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory compare \
   --baseline /var/lib/ai-agent-runtime/migration/pre-cutover.json \
   --candidate /var/lib/ai-agent-runtime/migration/post-cutover.json \
+  --binding-plan /var/lib/ai-agent-runtime/migration/binding-plan-resolved.json \
   --output /var/lib/ai-agent-runtime/migration/acceptance.json
 ```
 
@@ -206,6 +207,14 @@ Exit status `1` blocks acceptance when a topic is lost, added, rebound, renamed,
 duplicated, malformed, or leaves orphan upstream tmux state. Multiple topics
 sharing one canonical cwd are preserved as separate source refs and reported
 explicitly; they are never merged automatically.
+
+With `--binding-plan`, the read-only comparison also requires each `READY`
+binding's exact ID, Project ID, canonical cwd and account/model/reasoning profile
+in both the post-cutover CUS desired snapshot and Runtime local effective spec.
+The plan must be accepted, digest-valid and tied to the baseline inventory;
+missing, ambiguous or drifted records block acceptance without printing secrets.
+Before the reviewed binding plan exists, omit this option for the preliminary
+name/cwd/routing comparison; that preliminary result is not final cutover evidence.
 
 Generate a non-mutating Runtime Binding plan only after the baseline artifact
 has been reviewed. A managed topic is marked `READY` only when one exact CUS
@@ -257,10 +266,10 @@ state entry that could auto-resume an old session. Do not terminate active work 
 delete state/files to achieve this; a collision blocks cutover until a safe,
 reviewed migration step resolves it. The first managed message in each retained
 topic must create a new Codex session. Compare the post-cutover inventory to prove
-topic names, canonical cwd and routing have not drifted. Reconcile the reviewed
-binding plan against the CUS desired snapshot and Runtime effective/applied evidence
-to prove each topic's account/model/reasoning profile; inventory comparison alone
-does not establish those values.
+topic names, canonical cwd and routing have not drifted. Use the
+`--binding-plan` comparison to verify CUS desired and Runtime effective profile
+values, then separately inspect process evidence before calling a live instance
+Applied; a local spec alone never proves actual Codex parameters.
 
 The following provenance plan/import remains available **only** for a future
 explicitly approved legacy-continuation migration, after its own storage and

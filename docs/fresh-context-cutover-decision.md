@@ -8,9 +8,10 @@ to import legacy session provenance; it does not relax the other release gates.
 
 For every retained production topic, the cutover inventory comparison must still
 prove the exact AgentInstance/chat/thread identity, name, canonical cwd, routing,
-and engine/exec mode. The reviewed binding plan, CUS desired snapshot and Runtime
-post-cutover effective/applied evidence must separately prove the topic-scoped
-account/model/reasoning profile. Topics already
+and engine/exec mode. The `inventory compare --binding-plan` check additionally
+proves the reviewed topic-scoped account/model/reasoning values match both CUS
+desired and Runtime effective state; live process evidence still proves Applied.
+Topics already
 deleted from Telegram are excluded only through the existing digest-bound Owner
 decision process. Two topics with the same cwd remain separate bindings.
 
