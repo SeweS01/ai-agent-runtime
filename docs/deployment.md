@@ -310,8 +310,8 @@ ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory fresh-contex
 ```
 
 It requires an explicit isolated `tmux_tmpdir`, target topic config and tmux
-state paths distinct from the preserved legacy files, exact retained topic
-names/cwd/engine/mode in the target config, an empty target state, no live pane
+state paths distinct from the preserved legacy files, exactly the retained plan's
+topic keys and names/cwd/engine/mode in the target config, an empty target state, no live pane
 in the target tmux server, and a digest-valid plan for the same AgentInstance/forum.
 A missing isolated socket is acceptable before first launch;
 an unreadable or ambiguous socket is not. This command never clears state or kills

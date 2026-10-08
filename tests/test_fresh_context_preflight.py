@@ -120,6 +120,18 @@ def test_fresh_context_preflight_rejects_topic_name_or_cwd_drift(tmp_path: Path)
     assert report["issues"] == ["RETAINED_TOPIC_CONFIG_DRIFT"]
 
 
+def test_fresh_context_preflight_rejects_unplanned_topic(tmp_path: Path) -> None:
+    config, baseline, plan = _inputs(tmp_path)
+    raw = json.loads(config.topic_config_path.read_text())
+    raw["topics"]["43"] = dict(raw["topics"]["42"])
+    config.topic_config_path.write_text(json.dumps(raw))
+    report = build_fresh_context_preflight(
+        config, baseline=baseline, binding_plan=plan, live_tmux=_no_server()
+    )
+    assert report["accepted"] is False
+    assert report["issues"] == ["TARGET_TOPIC_SET_MISMATCH"]
+
+
 def test_fresh_context_preflight_rejects_missing_target_config(tmp_path: Path) -> None:
     config, baseline, plan = _inputs(tmp_path)
     config.topic_config_path.unlink()

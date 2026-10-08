@@ -98,6 +98,10 @@ def build_fresh_context_preflight(
             issues.append("TARGET_TOPIC_CONFIG_MISSING")
         else:
             snapshot = read_topic_config(topic_path)
+            target_topics = snapshot.raw["topics"]
+            assert isinstance(target_topics, dict)
+            if set(target_topics) != {str(thread_id) for thread_id in retained_threads}:
+                issues.append("TARGET_TOPIC_SET_MISMATCH")
             for thread_id in retained_threads:
                 expected_topic = baseline_by_thread.get(thread_id)
                 observed = snapshot.topic(thread_id)
