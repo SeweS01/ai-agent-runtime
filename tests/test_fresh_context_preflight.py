@@ -25,6 +25,7 @@ def _inputs(tmp_path: Path) -> tuple[RuntimeConfig, dict[str, object], dict[str,
         topic_config_path=tmp_path / "new" / "topic_config.json",
         tmux_state_path=tmp_path / "new" / "tmux_sessions" / "state.json",
         tmux_tmpdir=tmp_path / "run" / "tmux",
+        sessions_view_root=tmp_path / "new" / "session-view",
         upstream_sha="0" * 40,
         allowed_project_roots=(tmp_path / "projects",),
     )
@@ -112,6 +113,32 @@ def test_fresh_context_preflight_rejects_old_state_or_live_pane(tmp_path: Path) 
     )
     assert report["accepted"] is False
     assert report["issues"] == ["TARGET_TMUX_SERVER_NOT_EMPTY", "TARGET_TMUX_STATE_NOT_EMPTY"]
+
+
+def test_fresh_context_preflight_rejects_nonempty_session_view(tmp_path: Path) -> None:
+    config, baseline, plan = _inputs(tmp_path)
+    assert config.sessions_view_root is not None
+    config.sessions_view_root.mkdir()
+    (config.sessions_view_root / "old-session").mkdir()
+    report = build_fresh_context_preflight(
+        config, baseline=baseline, binding_plan=plan, live_tmux=_no_server()
+    )
+    assert report["accepted"] is False
+    assert report["issues"] == ["TARGET_SESSIONS_VIEW_NOT_EMPTY"]
+    assert report["target_sessions_view"]["entry_count"] == 1
+
+
+def test_fresh_context_preflight_rejects_symlinked_session_view(tmp_path: Path) -> None:
+    config, baseline, plan = _inputs(tmp_path)
+    assert config.sessions_view_root is not None
+    actual = tmp_path / "old-sessions"
+    actual.mkdir()
+    config.sessions_view_root.symlink_to(actual, target_is_directory=True)
+    report = build_fresh_context_preflight(
+        config, baseline=baseline, binding_plan=plan, live_tmux=_no_server()
+    )
+    assert report["accepted"] is False
+    assert report["issues"] == ["TARGET_SESSIONS_VIEW_IS_SYMLINK"]
 
 
 def test_fresh_context_preflight_rejects_topic_name_or_cwd_drift(tmp_path: Path) -> None:

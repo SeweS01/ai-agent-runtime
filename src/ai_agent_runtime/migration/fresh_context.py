@@ -179,6 +179,26 @@ def build_fresh_context_preflight(
     elif observed_tmux.get("reason") != "isolated_tmux_socket_absent" or raw_panes != []:
         issues.append("TARGET_TMUX_SERVER_UNVERIFIED")
 
+    view_root = config.sessions_view_root
+    view_evidence: dict[str, object] = {"configured": view_root is not None}
+    if view_root is not None:
+        view_evidence["path"] = str(view_root)
+        if view_root.is_symlink():
+            issues.append("TARGET_SESSIONS_VIEW_IS_SYMLINK")
+            view_evidence["present"] = True
+        elif not view_root.exists():
+            view_evidence["present"] = False
+            view_evidence["entry_count"] = 0
+        elif not view_root.is_dir():
+            issues.append("TARGET_SESSIONS_VIEW_NOT_DIRECTORY")
+            view_evidence["present"] = True
+        else:
+            entry_count = sum(1 for _ in view_root.iterdir())
+            view_evidence["present"] = True
+            view_evidence["entry_count"] = entry_count
+            if entry_count:
+                issues.append("TARGET_SESSIONS_VIEW_NOT_EMPTY")
+
     report: dict[str, object] = {
         "schema": FRESH_CONTEXT_PREFLIGHT_SCHEMA,
         "baseline_inventory_digest": baseline.get("inventory_digest"),
@@ -187,6 +207,7 @@ def build_fresh_context_preflight(
         "forum_chat_id": config.forum_chat_id,
         "target_topic_config": topic_evidence,
         "target_tmux_state": state_evidence,
+        "target_sessions_view": view_evidence,
         "target_tmux_observation": {
             "available": observed_tmux.get("available"),
             "reason": observed_tmux.get("reason"),
