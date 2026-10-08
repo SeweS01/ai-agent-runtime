@@ -29,6 +29,7 @@ from ai_agent_runtime.migration.binding_plan import (
     read_binding_migration_decisions,
     read_binding_migration_plan,
 )
+from ai_agent_runtime.migration.fresh_context import build_fresh_context_preflight
 from ai_agent_runtime.migration.inventory import (
     InventoryError,
     build_inventory,
@@ -121,6 +122,20 @@ def _inventory_compare(
         binding_plan=(
             read_binding_migration_plan(Path(binding_plan).expanduser()) if binding_plan else None
         ),
+    )
+    if output:
+        write_json_artifact(Path(output).expanduser(), report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["accepted"] else 1
+
+
+def _inventory_fresh_context_preflight(
+    config: RuntimeConfig, *, baseline: str, binding_plan: str, output: str | None
+) -> int:
+    report = build_fresh_context_preflight(
+        config,
+        baseline=read_inventory(Path(baseline).expanduser()),
+        binding_plan=read_binding_migration_plan(Path(binding_plan).expanduser()),
     )
     if output:
         write_json_artifact(Path(output).expanduser(), report)
@@ -513,6 +528,10 @@ def main() -> None:
     inventory_compare.add_argument("--candidate", required=True)
     inventory_compare.add_argument("--binding-plan")
     inventory_compare.add_argument("--output")
+    fresh_preflight = inventory_commands.add_parser("fresh-context-preflight")
+    fresh_preflight.add_argument("--baseline", required=True)
+    fresh_preflight.add_argument("--binding-plan", required=True)
+    fresh_preflight.add_argument("--output")
     inventory_plan = inventory_commands.add_parser("plan-bindings")
     inventory_plan.add_argument("--inventory", required=True)
     inventory_plan.add_argument("--generation-id", required=True)
@@ -762,6 +781,18 @@ def main() -> None:
                     cus_control_store=namespace.cus_control_store,
                     legacy_project_settings=namespace.legacy_project_settings,
                     skip_live_tmux=namespace.skip_live_tmux,
+                )
+            )
+        if (
+            namespace.command == "inventory"
+            and namespace.inventory_command == "fresh-context-preflight"
+        ):
+            raise SystemExit(
+                _inventory_fresh_context_preflight(
+                    config,
+                    baseline=namespace.baseline,
+                    binding_plan=namespace.binding_plan,
+                    output=namespace.output,
                 )
             )
     except (InventoryError, OSError, ValueError) as exc:

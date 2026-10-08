@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
+import sqlite3
 import subprocess
 import sys
 from copy import deepcopy
@@ -116,6 +118,33 @@ def test_inventory_compare_rejects_stale_or_tampered_plan() -> None:
         compare_inventories(baseline, candidate, binding_plan=plan)
 
 
+def test_runtime_binding_inventory_digest_handles_nonempty_sqlite(tmp_path: Path) -> None:
+    database = tmp_path / "runtime.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE bindings (
+                binding_id TEXT, agent_instance_id TEXT, chat_id INTEGER,
+                thread_id INTEGER, project_id TEXT, canonical_cwd TEXT,
+                configured INTEGER, management_mode TEXT
+            );
+            CREATE TABLE effective_specs (
+                binding_id TEXT, generation_id TEXT, revision INTEGER,
+                spec_digest TEXT, payload_json TEXT
+            );
+            INSERT INTO bindings VALUES (
+                'binding-42', 'agent-1', -1001, 42, 'project-42',
+                '/srv/project', 1, 'MANAGED'
+            );
+            """
+        )
+    indexed, evidence = inventory_module._load_runtime_bindings(
+        database, agent_instance_id="agent-1"
+    )
+    assert indexed[(-1001, 42)][0]["binding_id"] == "binding-42"
+    assert str(evidence["safe_records_digest"]).startswith("sha256:")
+
+
 def test_live_tmux_parser_uses_unescaped_tab_separator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -146,6 +175,51 @@ def test_live_tmux_parser_uses_unescaped_tab_separator(
                 "dead": False,
             }
         ],
+    }
+
+
+def test_live_tmux_uses_exact_isolated_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "isolated"
+    base.mkdir(mode=0o700)
+    socket_directory = base / f"tmux-{os.getuid()}"
+    socket_directory.mkdir(mode=0o700)
+    socket_path = socket_directory / "default"
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(socket_path))
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            assert command == [
+                "tmux",
+                "-S",
+                str(socket_path),
+                "list-panes",
+                "-a",
+                "-F",
+                inventory_module._TMUX_FORMAT,
+            ]
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(inventory_module.subprocess, "run", fake_run)
+        observed = inventory_module.collect_live_tmux(base)
+    assert observed == {"available": True, "reason": None, "panes": []}
+
+
+def test_live_tmux_does_not_fall_back_to_default_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "isolated"
+    base.mkdir(mode=0o700)
+
+    def unexpected_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("default tmux must not be queried")
+
+    monkeypatch.setattr(inventory_module.subprocess, "run", unexpected_run)
+    assert inventory_module.collect_live_tmux(base) == {
+        "available": False,
+        "reason": "isolated_tmux_socket_absent",
+        "panes": [],
     }
 
 
@@ -215,6 +289,25 @@ def _write_sources(config: RuntimeConfig) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return first, second
+
+
+def test_inventory_uses_configured_tmux_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(_config(tmp_path), tmux_tmpdir=tmp_path / "isolated-tmux")
+    _write_sources(config)
+
+    def fake_collect(selector: Path | None = None) -> dict[str, object]:
+        assert selector == config.tmux_tmpdir
+        return {"available": False, "reason": "isolated_tmux_socket_absent", "panes": []}
+
+    monkeypatch.setattr(inventory_module, "collect_live_tmux", fake_collect)
+    inventory = build_inventory(config)
+    assert inventory["live_tmux"] == {
+        "available": False,
+        "reason": "isolated_tmux_socket_absent",
+        "panes": [],
+    }
 
 
 def test_inventory_is_secret_free_digested_and_preserves_binding_scope(tmp_path: Path) -> None:

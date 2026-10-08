@@ -166,6 +166,10 @@ Before switching `TELEGRAM_CODEX_BIN`, create a read-only baseline artifact for
 each AgentInstance. The command records topic routing, safe effective-profile
 metadata, upstream tmux state and non-content live pane identities; it never
 copies bot tokens, Codex credentials, prompts or transcript contents.
+When `tmux_tmpdir` is explicit in the Runtime config, inventory queries only that
+AgentInstance's validated tmux socket; an absent or unsafe isolated socket never
+falls back to another bot's default tmux server. A legacy shadow config without
+an explicit selector continues to observe the legacy default server.
 
 ```bash
 ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory export \
@@ -270,6 +274,25 @@ topic names, canonical cwd and routing have not drifted. Use the
 `--binding-plan` comparison to verify CUS desired and Runtime effective profile
 values, then separately inspect process evidence before calling a live instance
 Applied; a local spec alone never proves actual Codex parameters.
+
+Use the read-only fresh-context guard against the **target** AgentInstance config
+after preparing its separate config/state namespace, immediately before cutover:
+
+```bash
+ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory fresh-context-preflight \
+  --baseline /var/lib/ai-agent-runtime/migration/pre-cutover.json \
+  --binding-plan /var/lib/ai-agent-runtime/migration/binding-plan-resolved.json \
+  --output /var/lib/ai-agent-runtime/migration/fresh-context-preflight.json
+```
+
+It requires an explicit isolated `tmux_tmpdir`, target topic config and tmux
+state paths distinct from the preserved legacy files, exact retained topic
+names/cwd/engine/mode in the target config, an empty target state, no live pane
+in the target tmux server, and a digest-valid plan for the same AgentInstance/forum.
+A missing isolated socket is acceptable before first launch;
+an unreadable or ambiguous socket is not. This command never clears state or kills
+tmux, and its `production_cutover_authorized=false` result is not a substitute for
+the full qualification report. Repeat it if any config/state/tmux input changes.
 
 The following provenance plan/import remains available **only** for a future
 explicitly approved legacy-continuation migration, after its own storage and

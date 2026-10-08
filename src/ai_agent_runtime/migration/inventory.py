@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -109,12 +110,40 @@ def _safe_cwd(raw: object) -> tuple[str | None, str | None, bool, list[str]]:
     return raw, canonical, exists, [] if exists else ["CWD_MISSING"]
 
 
-def collect_live_tmux() -> dict[str, object]:
+def collect_live_tmux(tmux_tmpdir: Path | None = None) -> dict[str, object]:
     """Collect non-content tmux pane identity without reading pane text/commands."""
 
+    command = ["tmux"]
+    if tmux_tmpdir is not None:
+        if not tmux_tmpdir.is_absolute() or ".." in tmux_tmpdir.parts or tmux_tmpdir.is_symlink():
+            return {"available": False, "reason": "unsafe_tmux_tmpdir", "panes": []}
+        try:
+            base = tmux_tmpdir.stat()
+            socket_directory = tmux_tmpdir / f"tmux-{os.getuid()}"
+            socket_parent = socket_directory.stat()
+            socket_path = socket_directory / "default"
+            socket_metadata = socket_path.lstat()
+        except FileNotFoundError:
+            return {"available": False, "reason": "isolated_tmux_socket_absent", "panes": []}
+        except OSError:
+            return {"available": False, "reason": "isolated_tmux_socket_unreadable", "panes": []}
+        if (
+            not stat.S_ISDIR(base.st_mode)
+            or base.st_uid != os.getuid()
+            or base.st_mode & 0o077
+            or socket_directory.is_symlink()
+            or not stat.S_ISDIR(socket_parent.st_mode)
+            or socket_parent.st_uid != os.getuid()
+            or socket_parent.st_mode & 0o077
+            or not stat.S_ISSOCK(socket_metadata.st_mode)
+            or socket_metadata.st_uid != os.getuid()
+        ):
+            return {"available": False, "reason": "unsafe_isolated_tmux_socket", "panes": []}
+        command.extend(["-S", str(socket_path)])
+    command.extend(["list-panes", "-a", "-F", _TMUX_FORMAT])
     try:
         result = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", _TMUX_FORMAT],
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -398,7 +427,12 @@ def _load_runtime_bindings(
         "path": str(path),
         "present": True,
         "sha256": sha256,
-        "safe_records_digest": _digest(indexed),
+        "safe_records_digest": _digest(
+            [
+                {"chat_id": chat_id, "thread_id": thread_id, "bindings": records}
+                for (chat_id, thread_id), records in sorted(indexed.items())
+            ]
+        ),
     }
 
 
@@ -440,7 +474,7 @@ def build_inventory(
         config.database_path,
         agent_instance_id=config.agent_instance_id,
     )
-    observed_tmux = live_tmux if live_tmux is not None else collect_live_tmux()
+    observed_tmux = live_tmux if live_tmux is not None else collect_live_tmux(config.tmux_tmpdir)
     panes = observed_tmux.get("panes", [])
     panes_by_session: dict[str, list[dict[str, object]]] = defaultdict(list)
     if isinstance(panes, list):
