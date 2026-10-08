@@ -126,6 +126,11 @@ def phase_b_verify(
     topic_config: TopicConfigSnapshot,
     replaced_session_id: str | None = None,
 ) -> UpstreamTmuxState:
+    if binding.config_digest != topic_config.digest:
+        raise RuntimeFailureError(
+            ErrorCode.CONFIG_DRIFT,
+            "fresh topic_config digest has not been reconciled during Phase B",
+        )
     candidates = tuple(
         state
         for state in states

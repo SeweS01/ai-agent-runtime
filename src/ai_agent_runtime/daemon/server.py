@@ -1430,6 +1430,8 @@ class RuntimeServer:
                 )
                 break
             except RuntimeFailureError as exc:
+                if exc.code is ErrorCode.CONFIG_DRIFT:
+                    raise
                 last_failure = exc
                 await asyncio.sleep(0.2)
         else:

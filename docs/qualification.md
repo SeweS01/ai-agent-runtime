@@ -184,9 +184,17 @@ ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml storage manifest \
   --profile work=/home/devops/.ai_profiles/codex/work \
   --profile personal=/home/devops/.ai_profiles/codex/personal \
   --shared-root /home/devops/.codex-shared \
+  --include-relative sessions \
+  --include-relative archived_sessions \
   --include-relative index.sqlite \
   --output /var/lib/ai-agent-runtime/migration/session-storage.json
 ```
+
+Specifying any `--include-relative` replaces, rather than extends, the default
+`sessions` and `archived_sessions` set. List both explicitly when adding
+provider-specific index/state paths. A single shared root for every path may
+then be blocked by same-name per-account index files; keep those files private
+to each account and qualify any session-only shared topology separately.
 
 The command reads metadata and hashes only, never follows a session symlink, rejects
 credential paths, performs no copy/link/delete, and creates a `0600` artifact without

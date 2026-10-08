@@ -520,6 +520,28 @@ def test_two_phase_correlation(tmp_path: Path) -> None:
     )
     assert verified.session_id == "codex-session"
 
+    _write_json(
+        topic_path,
+        {
+            "topics": {
+                "42": {
+                    "cwd": str(cwd),
+                    "engine": "codex",
+                    "exec_mode": "tmux",
+                    "name": "Renamed while Codex started",
+                }
+            }
+        },
+    )
+    with pytest.raises(RuntimeFailureError) as changed_config:
+        phase_b_verify(
+            binding=binding,
+            identity=identity,
+            states=read_tmux_states(state_path),
+            topic_config=read_topic_config(topic_path),
+        )
+    assert changed_config.value.code is ErrorCode.CONFIG_DRIFT
+
 
 def test_codex_subprocess_config_fails_closed(tmp_path: Path) -> None:
     cwd = tmp_path / "project"

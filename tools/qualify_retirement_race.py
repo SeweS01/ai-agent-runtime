@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import subprocess
@@ -26,6 +27,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_ROOT / "src"))
@@ -132,15 +134,16 @@ def patched_attributes(target: object, **updates: object) -> Iterator[None]:
 class UpstreamScenario:
     def __init__(self, upstream_root: Path, scratch: Path) -> None:
         sys.path.insert(0, str(upstream_root / "src"))
-        from telegram_bot.core.handlers import streaming
-        from telegram_bot.core.services import tmux_manager as tmux_module
-        from telegram_bot.core.services.tmux_manager import TmuxManager, TmuxSessionState
-
-        self.streaming = streaming
-        self.tmux_module = tmux_module
+        # The pinned upstream exists only in the qualification interpreter,
+        # not in the Runtime development environment used by mypy.
+        self.streaming: Any = importlib.import_module("telegram_bot.core.handlers.streaming")
+        self.tmux_module: Any = importlib.import_module("telegram_bot.core.services.tmux_manager")
+        tmux_manager = self.tmux_module
+        tmux_manager_type = tmux_manager.TmuxManager
+        tmux_session_state_type = tmux_manager.TmuxSessionState
         self.key = (-1001, 42)
-        self.manager = TmuxManager(scratch / "tmux_sessions")
-        self.state = TmuxSessionState(
+        self.manager: Any = tmux_manager_type(scratch / "tmux_sessions")
+        self.state = tmux_session_state_type(
             session_name="cc-n1001-42",
             session_dir=str(scratch / "tmux_sessions" / "cc-n1001-42"),
             session_id="session-1",
@@ -159,13 +162,13 @@ class UpstreamScenario:
         self.pasted: set[str] = set()
         self.evidence = PromptEvidence()
         self.capture_after_paste: Counter[str] = Counter()
-        self.manager._tmux_alive = lambda _session_name: self.alive  # type: ignore[method-assign]
-        self.manager.get_topic_config = lambda: None  # type: ignore[method-assign]
-        self.manager._transcript_path_for_state = lambda _state: None  # type: ignore[method-assign]
-        self.manager._codex_delivery_visible = (  # type: ignore[method-assign]
+        self.manager._tmux_alive = lambda _session_name: self.alive
+        self.manager.get_topic_config = lambda: None
+        self.manager._transcript_path_for_state = lambda _state: None
+        self.manager._codex_delivery_visible = (
             lambda _before, _after, prompt: self.alive and prompt in self.pasted
         )
-        self.manager._codex_prompt_still_in_input_bar = (  # type: ignore[method-assign]
+        self.manager._codex_prompt_still_in_input_bar = (
             lambda _pane, _prompt: False
         )
 
@@ -179,7 +182,7 @@ class UpstreamScenario:
         ) -> None:
             self.evidence.explicit_alerts[prompt] += 1
 
-        self.manager._send_modal_alert = types.MethodType(alert, self.manager)  # type: ignore[method-assign]
+        self.manager._send_modal_alert = types.MethodType(alert, self.manager)
 
     def retire(self) -> None:
         # External Runtime retirement kills tmux but does not mutate Telegram
@@ -261,14 +264,14 @@ def _prompt_outcomes(evidence: PromptEvidence, prompts: tuple[str, ...]) -> dict
 
 async def run_window(window: str, upstream_root: Path, scratch: Path) -> dict[str, object]:
     scenario = UpstreamScenario(upstream_root, scratch / window)
-    prompts = (f"race-{window}-1",)
+    prompts: tuple[str, ...] = (f"race-{window}-1",)
     with scenario.patches():
         if window == "first_launch_delayed_accept":
             # The first Enter is accepted by Codex, but its input bar still
             # displays the prompt for longer than upstream's settle budget.
             # Upstream must not tell the user to resend an already accepted
             # prompt. This reproduces the real 2026-10-06 staging failure.
-            scenario.manager._codex_prompt_still_in_input_bar = (  # type: ignore[method-assign]
+            scenario.manager._codex_prompt_still_in_input_bar = (
                 lambda _pane, _prompt: True
             )
             enter_calls = 0
@@ -287,13 +290,13 @@ async def run_window(window: str, upstream_root: Path, scratch: Path) -> dict[st
 
             def retire_after_probe(key: object) -> bool:
                 nonlocal calls
-                active = original_is_active(key)  # type: ignore[arg-type]
+                active = bool(original_is_active(key))
                 calls += 1
                 if calls == 1 and active:
                     scenario.retire()
                 return active
 
-            scenario.manager.is_active = retire_after_probe  # type: ignore[method-assign]
+            scenario.manager.is_active = retire_after_probe
             await scenario.dispatch(prompts[0], 1)
         elif window == "during_paste":
             original_paste = scenario.paste
@@ -324,22 +327,24 @@ async def run_window(window: str, upstream_root: Path, scratch: Path) -> dict[st
             original_mark = scenario.manager.mark_prompt_pending
 
             def retire_after_pending(key: object) -> None:
-                original_mark(key)  # type: ignore[arg-type]
+                original_mark(key)
                 scenario.retire()
 
-            scenario.manager.mark_prompt_pending = retire_after_pending  # type: ignore[method-assign]
+            scenario.manager.mark_prompt_pending = retire_after_pending
             await scenario.dispatch(prompts[0], 1)
         elif window == "turn_complete_before_runtime_idle":
-            from telegram_bot.core.services.claude import StreamEvent
+            stream_event_type = importlib.import_module(
+                "telegram_bot.core.services.claude"
+            ).StreamEvent
 
             await scenario.dispatch(prompts[0], 1)
             scenario.manager.handle_turn_event(
                 scenario.key,
-                StreamEvent("turn_start", "", turn_id="turn-1"),
+                stream_event_type("turn_start", "", turn_id="turn-1"),
             )
             scenario.manager.handle_turn_event(
                 scenario.key,
-                StreamEvent("turn_end", "", turn_id="turn-1"),
+                stream_event_type("turn_end", "", turn_id="turn-1"),
             )
             scenario.retire()
         elif window == "two_simultaneous_messages":

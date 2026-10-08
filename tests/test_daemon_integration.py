@@ -9,9 +9,10 @@ from pathlib import Path
 import pytest
 
 from ai_agent_runtime.config import RuntimeConfig
+from ai_agent_runtime.daemon import server as server_module
 from ai_agent_runtime.daemon.server import RuntimeServer
 from ai_agent_runtime.domain import DesiredSpec, ManagementMode, RuntimeBinding, sha256_digest
-from ai_agent_runtime.errors import RuntimeFailureError
+from ai_agent_runtime.errors import ErrorCode, RuntimeFailureError
 from ai_agent_runtime.ipc.client import request
 from ai_agent_runtime.ipc.protocol import versioned
 from ai_agent_runtime.process_safety import proc_starttime, profile_fingerprint
@@ -21,8 +22,9 @@ from ai_agent_runtime.telegram_upstream.topic_config import read_topic_config
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("switched_name", [False, True])
+@pytest.mark.parametrize("config_changed", [False, True])
 async def test_clear_waits_for_new_upstream_state(
-    tmp_path: Path, switched_name: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, switched_name: bool, config_changed: bool
 ) -> None:
     project = tmp_path / "project"
     project.mkdir(mode=0o700)
@@ -78,7 +80,7 @@ async def test_clear_waits_for_new_upstream_state(
     )
     daemon = RuntimeServer(
         config,
-        phase_b_timeout=1.0,
+        phase_b_timeout=30.0,
         identity_verifier=lambda _identity: None,
         child_verifier=lambda **_kwargs: {},
     )
@@ -130,6 +132,17 @@ async def test_clear_waits_for_new_upstream_state(
     assert registered is not None
     assert registered.launch_spec["replaced_session_id"] == "old-session"
 
+    saw_old_state = asyncio.Event()
+    original_reader = server_module.read_tmux_states
+
+    def observe_old_state(path: Path):  # type: ignore[no-untyped-def]
+        states = original_reader(path)
+        if any(state.session_id == "old-session" for state in states):
+            saw_old_state.set()
+        return states
+
+    monkeypatch.setattr(server_module, "read_tmux_states", observe_old_state)
+
     verification = asyncio.create_task(
         daemon._verify_started(
             str(uuid.uuid4()),
@@ -145,13 +158,154 @@ async def test_clear_waits_for_new_upstream_state(
             os.getuid(),
         )
     )
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(saw_old_state.wait(), timeout=30.0)
     assert not verification.done()
     write_state(None)
+    if config_changed:
+        topic_config.write_text(
+            json.dumps(
+                {
+                    "topics": {
+                        "42": {
+                            "cwd": str(project),
+                            "engine": "codex",
+                            "exec_mode": "tmux",
+                            "name": "Renamed during Phase B",
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(RuntimeFailureError) as drift:
+            await verification
+        assert drift.value.code is ErrorCode.CONFIG_DRIFT
+        assert daemon.store.get_applied_evidence(registration["instance_id"]) is None
+        return
     verified = await verification
     assert verified["ok"] is True
     assert verified["verified"] is True
     assert verified["session_id"] is None
+
+
+def test_resume_requires_same_binding_even_with_same_cwd_and_account(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    profile = tmp_path / "profiles" / "work"
+    profile.mkdir(parents=True, mode=0o700)
+    topic_config = tmp_path / "topic_config.json"
+    topic_config.write_text(
+        json.dumps(
+            {
+                "topics": {
+                    str(thread): {
+                        "cwd": str(project),
+                        "engine": "codex",
+                        "exec_mode": "tmux",
+                    }
+                    for thread in (42, 43)
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    tmux_state = tmp_path / "tmux_state.json"
+    tmux_state.write_text("{}", encoding="utf-8")
+    real_codex = tmp_path / "codex-real"
+    real_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_codex.chmod(0o700)
+    config = RuntimeConfig(
+        agent_instance_id="agent-1",
+        forum_chat_id=-1001,
+        state_dir=tmp_path / "runtime-state",
+        socket_path=tmp_path / "run/runtime.sock",
+        database_path=tmp_path / "runtime-state/runtime.sqlite",
+        real_codex=real_codex,
+        real_codex_version="test-1",
+        real_codex_sha256=f"sha256:{hashlib.sha256(real_codex.read_bytes()).hexdigest()}",
+        profiles_root=tmp_path / "profiles",
+        topic_config_path=topic_config,
+        tmux_state_path=tmux_state,
+        upstream_sha="0" * 40,
+        allowed_project_roots=(tmp_path,),
+    )
+    daemon = RuntimeServer(config, identity_verifier=lambda _identity: None)
+    try:
+        digest = read_topic_config(topic_config).digest
+        for thread in (42, 43):
+            binding_id = f"binding-{thread}"
+            daemon.store.upsert_binding(
+                RuntimeBinding(
+                    binding_id=binding_id,
+                    agent_instance_id="agent-1",
+                    chat_id=-1001,
+                    thread_id=thread,
+                    project_id="project-1",
+                    canonical_cwd=str(project),
+                    expected_tmux_session=f"cc-n1001-{thread}",
+                    config_digest=digest,
+                )
+            )
+            daemon.store.put_effective_spec(
+                DesiredSpec.build(
+                    binding_id=binding_id,
+                    agent_instance_id="agent-1",
+                    project_id="project-1",
+                    canonical_cwd=str(project),
+                    provider="codex",
+                    account_profile="work",
+                    model="gpt-test",
+                    reasoning_effort="high",
+                    generation_id="gen-1",
+                    revision=1,
+                ),
+                codex_home=profile,
+                profile_fingerprint="test-profile",
+            )
+        daemon.store.record_session_provenance(
+            session_id="owned-by-42",
+            binding_id="binding-42",
+            account_profile="work",
+        )
+        pid = os.getpid()
+        identity = {
+            "wrapper": {"pid": pid, "starttime": proc_starttime(pid), "uid": os.getuid()},
+            "cwd": str(project),
+            "tmux_pane": "%1",
+        }
+        allowed = daemon._register(
+            str(uuid.uuid4()),
+            {
+                "agent_instance_id": "agent-1",
+                "resume_session_id": "owned-by-42",
+                "tmux_session": "cc-n1001-42",
+                **identity,
+            },
+            pid,
+            os.getuid(),
+        )
+        assert allowed["binding_id"] == "binding-42"
+
+        with pytest.raises(RuntimeFailureError) as rejected:
+            daemon._register(
+                str(uuid.uuid4()),
+                {
+                    "agent_instance_id": "agent-1",
+                    "resume_session_id": "owned-by-42",
+                    "tmux_session": "cc-n1001-43",
+                    **identity,
+                },
+                pid,
+                os.getuid(),
+            )
+        assert rejected.value.code is ErrorCode.RESUME_BINDING_MISMATCH
+        assert daemon.store.session_owner("owned-by-42") == ("binding-42", "work")
+        notices = daemon.store.claim_outbox(now=100.0)
+        assert len(notices) == 1
+        assert notices[0]["payload"]["notification_code"] == "RESUME_BINDING_MISMATCH"
+        assert notices[0]["binding_id"] == "binding-43"
+    finally:
+        daemon.store.close()
 
 
 @pytest.mark.asyncio
