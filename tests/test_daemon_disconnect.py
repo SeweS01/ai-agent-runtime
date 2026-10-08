@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -15,9 +16,9 @@ from ai_agent_runtime.ipc.protocol import versioned
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["status", "invalid_action"])
+@pytest.mark.parametrize("action", ["status", "invalid_action", None])
 async def test_disconnected_peer_during_response_is_ignored(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str | None
 ) -> None:
     config = RuntimeConfig(
         agent_instance_id="test-agent",
@@ -36,6 +37,8 @@ async def test_disconnected_peer_during_response_is_ignored(
     daemon = RuntimeServer(config)
 
     async def fake_read_frame(_reader: object) -> dict[str, object]:
+        if action is None:
+            raise asyncio.IncompleteReadError(partial=b"", expected=4)
         return versioned(action, "request-disconnect")
 
     monkeypatch.setattr(server_module, "read_frame", fake_read_frame)
@@ -51,4 +54,7 @@ async def test_disconnected_peer_during_response_is_ignored(
 
     writer.close.assert_called_once()
     writer.wait_closed.assert_awaited_once()
-    writer.drain.assert_awaited_once()
+    if action is None:
+        writer.drain.assert_not_awaited()
+    else:
+        writer.drain.assert_awaited_once()

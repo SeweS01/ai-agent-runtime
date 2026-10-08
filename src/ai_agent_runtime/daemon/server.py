@@ -338,7 +338,7 @@ class RuntimeServer:
                 not in {"heartbeat", "control_plane_heartbeat", "status", "outbox_pull"},
             )
             await write_frame(writer, response)
-        except (ConnectionError, TimeoutError):
+        except (ConnectionError, TimeoutError, asyncio.IncompleteReadError):
             # The peer may have timed out or disconnected while a response was
             # being prepared. There is no recipient for an error frame; trying
             # to write one only creates another broken-pipe exception.
