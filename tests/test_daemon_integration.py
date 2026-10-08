@@ -451,6 +451,13 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     assert verified["ok"] is True
     assert verified["applied"] is False
     assert verified["session_id"] == "session-1"
+
+    def durable_result_count() -> int:
+        row = daemon.store._connection.execute("SELECT COUNT(*) FROM request_results").fetchone()
+        assert row is not None
+        return int(row[0])
+
+    assert durable_result_count() == 2  # register and verify_started
     for _ in range(100):
         if daemon.store.session_owner("session-1") is not None:
             break
@@ -615,6 +622,7 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     )
     assert rapid_restart["ok"] is True
     assert rapid_restart["resynchronized"] is True
+    assert durable_result_count() == 2  # heartbeats never grow the durable cache
 
     wrong_heartbeat = await request(
         config.socket_path,
@@ -668,6 +676,7 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
         ),
     )
     assert exited["ok"] is True
+    assert durable_result_count() == 3  # child_exited must survive a lost ACK
     status = await request(
         config.socket_path,
         versioned("status", str(uuid.uuid4())),
@@ -695,6 +704,7 @@ async def test_real_unix_socket_phase_a_then_phase_b(tmp_path: Path) -> None:
     )
     assert synced_status["status"]["control_plane_sync"]["state"] == "IN_SYNC"
     assert synced_status["status"]["bindings"][0]["health"] == "RUNTIME_HEALTHY"
+    assert durable_result_count() == 3  # status and control-plane polls are repeatable
 
     topic_config.write_text(
         json.dumps(

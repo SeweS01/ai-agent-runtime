@@ -330,7 +330,12 @@ class RuntimeServer:
                 response = self._ok(request_id, acknowledged=True)
             else:
                 raise RuntimeFailureError(ErrorCode.INVALID_REQUEST, f"unknown action: {action}")
-            self._cache(request_id, request_digest, response)
+            self._cache(
+                request_id,
+                request_digest,
+                response,
+                durable=action not in {"heartbeat", "control_plane_heartbeat", "status"},
+            )
             await write_frame(writer, response)
         except RuntimeFailureError as exc:
             await write_frame(writer, self._error(request_id, exc.code, exc.detail))
@@ -1994,10 +1999,13 @@ class RuntimeServer:
         request_id: str,
         request_digest: str,
         result: dict[str, Any],
+        *,
+        durable: bool,
     ) -> None:
         self._results[request_id] = (request_digest, result)
         self._results.move_to_end(request_id)
-        self.store.put_request_result(request_id, request_digest, result)
+        if durable:
+            self.store.put_request_result(request_id, request_digest, result)
         while len(self._results) > 1024:
             self._results.popitem(last=False)
 
