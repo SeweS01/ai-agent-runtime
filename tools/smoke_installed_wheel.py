@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,12 +22,17 @@ def main() -> int:
     wheel = args.wheel.expanduser().resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="ai-agent-runtime-wheel-smoke-") as raw_root:
         root = Path(raw_root)
+        # Hosted runners may provide a group/world-writable Python binary.
+        # Use a private test copy so the real installer safety check still runs.
+        smoke_python = root / "python-smoke"
+        shutil.copy2(Path(sys.executable).resolve(strict=True), smoke_python)
+        smoke_python.chmod(0o700)
         report = install_runtime_release(
             wheel=wheel,
             wheel_sha256=file_sha256(wheel),
             releases_root=root / "releases",
             release_id="wheel-smoke",
-            python=Path(sys.executable),
+            python=smoke_python,
         )
         runtime = Path(str(report["runtime_executable"]))
         wrapper = Path(str(report["wrapper_executable"]))
