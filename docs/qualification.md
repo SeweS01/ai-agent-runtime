@@ -11,6 +11,8 @@ Required blocking gates include:
   `/resume` tmux name, `/resume`, `/tui`, `/kill`, and
   `/recycle` behavior;
 - full Codex session-storage lifecycle across isolated accounts;
+- retained production topic identity, name, cwd and profile with a fresh Codex
+  session after cutover; pre-cutover `/resume` denied without provenance;
 - same-binding and same-account resume provenance;
 - provider-qualified BUSY/IDLE signals;
 - deterministic external-tmux-retirement race injection for every queue/paste/turn
@@ -218,22 +220,26 @@ is `STAGED_NOT_ACTIVATED`: this command deliberately does not switch `CODEX_HOME
 create shared-session links, or claim lifecycle qualification. Activation topology
 remains a pinned-Codex qualification result, not an installer assumption.
 
-Once that topology is selected for a migration rehearsal, regenerate the M0
-inventory and the digest-bound session-provenance plan described in `deployment.md`.
-The `legacy_session_provenance_import` and same-binding `/resume` assertions must
-prove both an imported pre-cutover current session and a session created natively
-after Runtime launch. The legacy import must be rejected unless the live pane's
-process identity, qualified binary digest, canonical cwd and safe `CODEX_HOME`
-independently prove the same account selected by the binding plan. Any changed rollout
-path/device/inode after planning must make the import fail closed; an unproven older
-picker entry must also fail closed rather than being assigned by cwd.
+For the approved fresh-context cutover, an existing managed topic must keep its
+name, canonical cwd and account/model/reasoning profile while its first new
+message creates a fresh Codex session. The `fresh_session_for_existing_topic`
+assertion must prove this in the new AgentInstance, not merely in a new test topic.
+The `legacy_session_resume_denied` assertion must show that an unproven
+pre-cutover picker entry cannot launch real Codex. Same-binding `/resume` must
+work for a session created natively after Runtime launch. Pre-cutover provenance
+import is not a release gate; the optional workflow remains documented in
+`deployment.md` for a separately approved continuation migration. Storage
+qualification still covers newly created sessions, archives/index/state,
+concurrent accounts and rollback. See `fresh-context-cutover-decision.md`.
 
 ## Rollback preservation versus rollback qualification
 
 Create and verify the legacy rollback manifest described in `deployment.md` before
 cutover. That verification proves only that the exact legacy commit and selected
 non-secret rollback inputs remain available and unchanged. The separate
-`rollback_drill` qualification gate must still exercise restoration of session
-topology while preserving sessions created after staging, followed by the legacy
-end-to-end path. Neither the preservation manifest nor its verifier can emit a
-passing qualification evidence artifact on its own.
+`rollback_drill` qualification gate must still prove the old service/configuration
+can run and that the legacy session topology remains restorable, while preserving
+sessions created after staging, followed by the legacy end-to-end path. If the
+old topology was kept untouched, the drill verifies that fact rather than
+performing a needless filesystem rewrite. Neither the preservation manifest nor
+its verifier can emit passing qualification evidence on its own.

@@ -115,6 +115,9 @@ def test_missing_gate_blocks_release(tmp_path: Path) -> None:
     [
         ("telegram_e2e", "first_launch_reply_exactly_once"),
         ("cus_bot_onboarding", "user_created_topic_auto_notice"),
+        ("session_storage_lifecycle", "existing_topic_name_cwd_profile_preserved"),
+        ("session_storage_lifecycle", "fresh_session_for_existing_topic"),
+        ("session_storage_lifecycle", "legacy_session_resume_denied"),
     ],
 )
 def test_repeated_staging_regressions_cannot_be_omitted_from_evidence(

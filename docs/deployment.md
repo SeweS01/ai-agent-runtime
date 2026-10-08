@@ -247,9 +247,24 @@ only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends o
 authoritative Runtime snapshot, keeping non-Codex entries explicitly `UNMANAGED`
 instead of rewriting their Telegram Agent engine.
 
-After that authoritative snapshot exists in Runtime, create a separate provenance
-plan for the exact Codex sessions named by the pre-cutover upstream tmux state. Do
-this only after the qualified session-storage topology and rollout paths are final:
+The Owner's fresh-context cutover decision is recorded in
+`fresh-context-cutover-decision.md`. Importing pre-cutover Codex sessions is **not**
+required for this migration. Keep the legacy tmux state and session files as
+rollback inputs, but do not carry old tmux state into the new AgentInstance or
+reattach a legacy pane. At the maintenance window, first establish that no topic
+is BUSY, then verify the new namespace has no live legacy tmux session name or
+state entry that could auto-resume an old session. Do not terminate active work or
+delete state/files to achieve this; a collision blocks cutover until a safe,
+reviewed migration step resolves it. The first managed message in each retained
+topic must create a new Codex session. Compare the post-cutover inventory to prove
+topic names, canonical cwd and routing have not drifted. Reconcile the reviewed
+binding plan against the CUS desired snapshot and Runtime effective/applied evidence
+to prove each topic's account/model/reasoning profile; inventory comparison alone
+does not establish those values.
+
+The following provenance plan/import remains available **only** for a future
+explicitly approved legacy-continuation migration, after its own storage and
+rollout qualification. It is not part of the current production checklist:
 
 ```bash
 ai-agent-runtime inventory plan-session-provenance \
@@ -276,11 +291,12 @@ identity before atomically inserting immutable binding/account ownership. If the
 legacy process exits or changes between planning and import, the import fails closed;
 repeating the same digest-bound import while evidence remains valid is idempotent.
 
-This migration deliberately covers only sessions whose topic ownership is proven by
-the exact upstream state at inventory time. Older picker entries without such proof
-are preserved on disk but are not guessed from cwd or account; they remain
-fail-closed for `/resume`. Regenerate both inventory and provenance plan if upstream
-state or the session-storage topology changes before cutover.
+Even without an import, older picker entries may remain visible. Unknown legacy
+sessions are preserved on disk but are never assigned a binding from cwd or
+account; `/resume` must fail closed before real Codex starts. New sessions created
+after cutover acquire normal binding/account provenance. If an optional legacy
+continuation migration is later approved, regenerate its inventory and plan
+whenever upstream state or storage topology changes before importing.
 
 The same inventory command is the M1 shadow-mode observer when it runs before the
 `TELEGRAM_CODEX_BIN` switch. Every topic receives one conservative confidence:
