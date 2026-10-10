@@ -173,6 +173,7 @@ def test_stage_command_rejects_report_target_collision_before_writing(tmp_path: 
 def test_stage_command_rejects_insecure_report_parent_before_writing(tmp_path: Path) -> None:
     report_parent = tmp_path / "insecure"
     report_parent.mkdir(mode=0o755)
+    os.chmod(report_parent, 0o755)
     with pytest.raises(InventoryError, match="report parent must be owned and mode 0700"):
         _inventory_stage_topic_config(
             baseline="missing-baseline.json",
