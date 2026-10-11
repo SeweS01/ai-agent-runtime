@@ -121,7 +121,7 @@ wheel as the daemon and wrapper. Run the installed release entrypoint against a
 clean upstream checkout:
 
 ```bash
-/home/devops/.local/lib/ai-agent-runtime/releases/<release-id>/bin/ai-agent-runtime-qualify-upstream \
+/srv/ai-agent-runtime/releases/<release-id>/bin/ai-agent-runtime-qualify-upstream \
   /path/to/telegram-ai-agent \
   --release-tuple /srv/qualification/release-tuple.json \
   --report-id staging-2026-10-04-001 \
@@ -142,7 +142,7 @@ delayed-accept first-launch window, and records
 per-prompt submission and explicit-alert evidence:
 
 ```bash
-/home/devops/.local/lib/ai-agent-runtime/releases/<release-id>/bin/ai-agent-runtime-qualify-retirement \
+/srv/ai-agent-runtime/releases/<release-id>/bin/ai-agent-runtime-qualify-retirement \
   --upstream /path/to/telegram-ai-agent \
   --release-tuple /srv/qualification/release-tuple.json \
   --report-id staging-2026-10-04-001 \
@@ -183,9 +183,9 @@ Codex version rather than assuming their names.
 
 ```bash
 ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml storage manifest \
-  --profile work=/home/devops/.ai_profiles/codex/work \
-  --profile personal=/home/devops/.ai_profiles/codex/personal \
-  --shared-root /home/devops/.codex-shared \
+  --profile work=/srv/ai-agent-runtime/profiles/codex/work \
+  --profile personal=/srv/ai-agent-runtime/profiles/codex/personal \
+  --shared-root /srv/ai-agent-runtime/shared-sessions \
   --include-relative sessions \
   --include-relative archived_sessions \
   --include-relative index.sqlite \
@@ -230,7 +230,7 @@ work for a session created natively after Runtime launch. Pre-cutover provenance
 import is not a release gate; the optional workflow remains documented in
 `deployment.md` for a separately approved continuation migration. Storage
 qualification still covers newly created sessions, archives/index/state,
-concurrent accounts and rollback. See `fresh-context-cutover-decision.md`.
+concurrent accounts and rollback.
 
 ## Rollback preservation versus rollback qualification
 

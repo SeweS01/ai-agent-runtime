@@ -29,8 +29,8 @@ Both phases are required. Cwd alone is never an identity.
 The pinned upstream deliberately launches agents through `env -i`; arbitrary service
 environment variables are not inherited. Multi-AgentInstance deployments therefore
 use an instance-specific safe executable name such as
-`codex-wrapper@ta_prod_01`. The wrapper derives
-`~/.config/ai-agent-runtime/instances/ta_prod_01.toml` from that name. The generic
+`codex-wrapper@agent_01`. The wrapper derives
+`~/.config/ai-agent-runtime/instances/agent_01.toml` from that name. The generic
 `codex-wrapper` uses the single-instance `config.toml`. An environment override is a
 development/operator convenience, not the production namespace mechanism.
 
@@ -101,19 +101,16 @@ never unlinks a regular file or symlink at the configured path. Shutdown records
 created socket inode and removes it only if the path still identifies that exact
 socket, preventing a replacement path from being deleted.
 
-## Current implementation milestone
+## Implemented Runtime V1 surface
 
 The executable launch skeleton, durable/idempotent local protocol, incremental and
 authoritative snapshot apply, durable retrying outbox, SQLite state, fresh-read
 adapters, two-phase correlation, process-group supervision, live-wrapper
 resynchronization, qualified Codex rollout observation, exact-target retirement,
 read-only operator diagnostics, and fail-closed policies are implemented and tested.
-Retirement remains disabled by default and requires a qualification report
-identifier. A deterministic pinned-upstream retirement harness exists, but only a
-staging artifact can satisfy the release gate. Pinned-upstream source qualification
-now emits release-tuple-bound evidence, and rollback inputs can be pinned and
-reverified without authorizing cleanup. One real Telegram-to-Codex-to-Telegram
-staging smoke passed on 2026-10-05 using an isolated single-profile sessions
-view; it is not complete release-tuple qualification. Multi-account session
-storage lifecycle, race qualification, and rollback-drill evidence remain
-production release blockers. This milestone is not a production release.
+Retirement remains disabled by default and requires an exact qualification report
+identifier. The pinned-upstream qualification tools emit release-tuple-bound
+evidence, and rollback inputs can be pinned and reverified without authorizing
+cleanup. Every deployment must qualify its own Telegram Agent, Codex binary,
+Runtime wheel, CUS connector, filesystem layout, and rollback tuple; repository test
+results are not deployment evidence.

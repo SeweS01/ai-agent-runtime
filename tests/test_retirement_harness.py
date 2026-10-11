@@ -23,6 +23,19 @@ UPSTREAM_PYTHON = UPSTREAM_ROOT / ".venv/bin/python"
 UPSTREAM_SHA = "0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b"
 
 
+def _upstream_head() -> str:
+    if not (UPSTREAM_ROOT / ".git").is_dir():
+        return ""
+    result = subprocess.run(
+        ["git", "-C", str(UPSTREAM_ROOT), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def test_retirement_entrypoint_reexecs_with_sanitized_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -75,8 +88,8 @@ def test_submitted_prompt_with_failure_alert_is_unsafe() -> None:
 
 
 @pytest.mark.skipif(
-    not (UPSTREAM_ROOT / ".git").is_dir() or not UPSTREAM_PYTHON.is_file(),
-    reason="pinned Telegram Agent qualification checkout/environment absent",
+    _upstream_head() != UPSTREAM_SHA or not UPSTREAM_PYTHON.is_file(),
+    reason="exact pinned Telegram Agent qualification checkout/environment absent",
 )
 def test_pinned_upstream_delivery_fault_matrix_exposes_first_launch_bug(tmp_path: Path) -> None:
     release_tuple = {

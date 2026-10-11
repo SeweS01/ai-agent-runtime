@@ -3,14 +3,14 @@
 V1 uses one upstream Telegram Agent, one forum chat, and one Runtime namespace per
 AgentInstance. A host may run several independent instances under the same Unix user.
 
-For an AgentInstance named `ta_prod_01`:
+For an AgentInstance named `agent_01`:
 
 - Runtime config:
-  `~/.config/ai-agent-runtime/instances/ta_prod_01.toml`;
-- Runtime service: `ai-agent-runtime@ta_prod_01.service`;
-- Runtime executable name: `~/.local/bin/ai-agent-runtime@ta_prod_01`;
-- socket: `/run/user/$UID/ai-agent-runtime/ta_prod_01/runtime.sock`;
-- wrapper executable name: `~/.local/bin/codex-wrapper@ta_prod_01`;
+  `~/.config/ai-agent-runtime/instances/agent_01.toml`;
+- Runtime service: `ai-agent-runtime@agent_01.service`;
+- Runtime executable name: `~/.local/bin/ai-agent-runtime@agent_01`;
+- socket: `/run/user/$UID/ai-agent-runtime/agent_01/runtime.sock`;
+- wrapper executable name: `~/.local/bin/codex-wrapper@agent_01`;
 - Telegram Agent `TELEGRAM_CODEX_BIN` points to that instance-specific executable;
 - Telegram Agent config/state, bot token, tmux prefix/namespace, and systemd service
   are also instance-specific.
@@ -51,7 +51,7 @@ changes an active symlink, restarts a service, or removes an older release:
 ai-agent-runtime deployment install-release \
   --wheel /srv/releases/ai_agent_runtime-0.1.0-py3-none-any.whl \
   --wheel-sha256 sha256:<exact-wheel-digest> \
-  --releases-root /home/devops/.local/lib/ai-agent-runtime/releases \
+  --releases-root /srv/ai-agent-runtime/releases \
   --release-id runtime-0.1.0-<git-sha> \
   --python /usr/bin/python3.12 \
   --output /srv/qualification/runtime-install-report.json
@@ -62,11 +62,11 @@ ai-agent-runtime deployment verify-install \
 
 ai-agent-runtime deployment prepare-instance-links \
   --install-report /srv/qualification/runtime-install-report.json \
-  --agent-instance-id ta_staging_01 \
-  --instance-link /home/devops/.local/lib/ai-agent-runtime/instances/ta_staging_01 \
-  --runtime-link /home/devops/.local/bin/ai-agent-runtime@ta_staging_01 \
-  --wrapper-link /home/devops/.local/bin/codex-wrapper@ta_staging_01 \
-  --output /srv/qualification/ta_staging_01-link-preparation.json
+  --agent-instance-id agent_01 \
+  --instance-link /srv/ai-agent-runtime/instances/agent_01 \
+  --runtime-link /usr/local/bin/ai-agent-runtime@agent_01 \
+  --wrapper-link /usr/local/bin/codex-wrapper@agent_01 \
+  --output /srv/qualification/agent_01-link-preparation.json
 ```
 
 An upgrade repeats this command with a new release ID. The result is
@@ -94,12 +94,12 @@ switch only its stable release symlink with a separate, audited command:
 ai-agent-runtime deployment switch-instance-release \
   --old-install-report /srv/qualification/runtime-install-old.json \
   --new-install-report /srv/qualification/runtime-install-new.json \
-  --agent-instance-id ta_staging_01 \
-  --instance-link /home/devops/.local/lib/ai-agent-runtime/instances/ta_staging_01 \
-  --runtime-link /home/devops/.local/bin/ai-agent-runtime@ta_staging_01 \
-  --wrapper-link /home/devops/.local/bin/codex-wrapper@ta_staging_01 \
-  --intent /srv/qualification/ta_staging_01-switch-intent.json \
-  --result /srv/qualification/ta_staging_01-switch-result.json
+  --agent-instance-id agent_01 \
+  --instance-link /srv/ai-agent-runtime/instances/agent_01 \
+  --runtime-link /usr/local/bin/ai-agent-runtime@agent_01 \
+  --wrapper-link /usr/local/bin/codex-wrapper@agent_01 \
+  --intent /srv/qualification/agent_01-switch-intent.json \
+  --result /srv/qualification/agent_01-switch-result.json
 ```
 
 Both install reports must still verify against their wheels and installed files. The
@@ -125,7 +125,7 @@ ai-agent-runtime deployment manifest \
   --runtime-install-report /srv/qualification/runtime-install-report.json \
   --qualification-manifest /srv/qualification/qualification-manifest.json \
   --rollback-manifest /srv/qualification/rollback-manifest.json \
-  --instance /srv/qualification/instances/ta_staging_01.json \
+  --instance /srv/qualification/instances/agent_01.json \
   --output /srv/qualification/deployment-manifest.json
 
 ai-agent-runtime deployment audit \
@@ -174,7 +174,7 @@ After starting a staging instance, run the read-only live diagnostic before any
 Telegram prompt test:
 
 ```bash
-ai-agent-runtime --config ~/.config/ai-agent-runtime/instances/ta_staging_01.toml doctor
+ai-agent-runtime --config ~/.config/ai-agent-runtime/instances/agent_01.toml doctor
 ```
 
 `doctor` fails unless it can verify the mode/owner of the local socket, obtain a
@@ -207,7 +207,7 @@ settings file instead of `--cus-control-store`:
 ```bash
 ai-agent-runtime --config /etc/ai-agent-runtime/prod.toml inventory export \
   --legacy-project-settings \
-    /home/devops/.ai_session_control_center/project_settings_v2.json \
+    /var/lib/ai-session-control-center/project_settings_v2.json \
   --output /var/lib/ai-agent-runtime/migration/pre-cutover-from-legacy.json
 ```
 
@@ -308,9 +308,8 @@ only a reviewed, digest-valid, unblocked plan can be committed. CUS then sends o
 authoritative Runtime snapshot, keeping non-Codex entries explicitly `UNMANAGED`
 instead of rewriting their Telegram Agent engine.
 
-The Owner's fresh-context cutover decision is recorded in
-`fresh-context-cutover-decision.md`. Importing pre-cutover Codex sessions is **not**
-required for this migration. Keep the legacy tmux state and session files as
+When a deployment explicitly chooses a fresh-context cutover, importing pre-cutover
+Codex sessions is not required. Keep the legacy tmux state and session files as
 rollback inputs, but do not carry old tmux state into the new AgentInstance or
 reattach a legacy pane. At the maintenance window, first establish that no topic
 is BUSY, then verify the new namespace has no live legacy tmux session name or

@@ -1,26 +1,26 @@
 [runtime]
-agent_instance_id = "ta_staging_01"
+agent_instance_id = "agent_01"
 forum_chat_id = -1001234567890
-state_dir = "/home/devops/.local/state/ai-agent-runtime/ta_staging_01"
-socket = "/run/user/1000/ai-agent-runtime/ta_staging_01/runtime.sock"
-database = "/home/devops/.local/state/ai-agent-runtime/ta_staging_01/runtime.sqlite"
+state_dir = "/var/lib/ai-agent-runtime/agent_01"
+socket = "/run/user/1000/ai-agent-runtime/agent_01/runtime.sock"
+database = "/var/lib/ai-agent-runtime/agent_01/runtime.sqlite"
 
 [telegram_agent]
-topic_config = "/home/devops/apps/telegram-ai-agent/topic_config.json"
-tmux_state = "/home/devops/apps/telegram-ai-agent/tmux_sessions/state.json"
-tmux_tmpdir = "/run/user/1000/ai-agent-runtime/ta_staging_01/tmux"
-upstream_sha = "0430c4e4ddbc6b7a2cfcccd5af95c456a3d3961b"
+topic_config = "/var/lib/telegram-ai-agent/topic_config.json"
+tmux_state = "/var/lib/telegram-ai-agent/tmux_sessions/state.json"
+tmux_tmpdir = "/run/user/1000/ai-agent-runtime/agent_01/tmux"
+upstream_sha = "0000000000000000000000000000000000000000"
 tmux_session_prefix = "cc-"
 
 [codex]
-real_binary = "/home/devops/.local/bin/codex-real"
+real_binary = "/usr/local/bin/codex-real"
 version = "0.0.0-qualified-placeholder"
 sha256 = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-profiles_root = "/home/devops/.local/share/ai-agent-runtime/profiles"
+profiles_root = "/srv/ai-agent-runtime/profiles"
 
 [policy]
-allowed_project_roots = ["/home/devops/workspace"]
-# This must remain false until the exact release tuple has passed the mandatory
+allowed_project_roots = ["/srv/projects"]
+# Keep this false until the exact release tuple passes the mandatory
 # deterministic queue/paste/turn retirement race matrix.
 retirement_enabled = false
 retirement_qualification_report_id = ""

@@ -1,38 +1,39 @@
 # AI Agent Runtime
 
-AI Agent Runtime is the execution/control layer between an unchanged
-`pavel-molyanov/telegram-ai-agent` installation and provider CLIs. V1 supervises
-Codex inside tmux while CUS supplies versioned desired state outside the message path.
-
-The repository deliberately does not contain Telegram routing, CUS business logic,
-credentials, provider profiles, or patched Telegram Agent code.
+AI Agent Runtime is the provider-agnostic execution and control layer between an
+unchanged Telegram Agent installation and AI CLI providers. Runtime V1 supervises
+Codex inside tmux while AI Session Control Center (CUS) supplies versioned desired
+state outside the message path.
 
 ## V1 invariants
 
-- Telegram Agent creates tmux and owns message delivery.
-- `codex-wrapper` starts only after an exact local Runtime Binding is found.
+- Telegram Agent creates tmux sessions and owns message delivery.
+- Runtime integrates through a version-qualified adapter; it does not patch, vendor,
+  or shadow-import Telegram Agent.
+- `codex-wrapper` starts only after an exact local Runtime binding is proven.
 - Wrapper startup never performs a network request to CUS.
 - Unknown, ambiguous, drifted, or non-tmux Codex launches fail closed.
-- CUS outage may use a verified local effective spec; Runtime daemon outage denies a new start.
-- Runtime and Telegram Agent are integrated only through the configured binary and
-  version-qualified filesystem/process adapters.
+- CUS outage may use verified local last-known-good state; Runtime daemon outage
+  denies a new launch.
+- Codex subprocess execution is unsupported in Runtime V1.
+- Credentials, provider profiles, Telegram routing, and CUS business logic do not
+  belong in this repository or protocol.
 
 ## Development
 
+Requirements: Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+
 ```bash
-uv sync --dev
-uv run pytest
+uv sync --locked --dev
+uv run pytest -q
 uv run ruff check .
 uv run mypy src/
 ```
 
-The production release tuple and qualification evidence are generated later; a moving
-upstream branch is never a production dependency.
+See [architecture](docs/architecture.md), [protocol](docs/protocol.md),
+[deployment](docs/deployment.md), and [qualification](docs/qualification.md).
+A secret-free example configuration is available at
+[`config/runtime.example.toml`](config/runtime.example.toml).
 
-The current code is an implementation milestone, not a production release. See
-[`docs/architecture.md`](docs/architecture.md) and
-[`docs/qualification.md`](docs/qualification.md) for trust boundaries and blocking
-release gates. The versioned local contract is in
-[`docs/protocol.md`](docs/protocol.md). `config/runtime.example.toml` contains paths
-only and no credentials. [`docs/deployment.md`](docs/deployment.md) defines the
-multi-AgentInstance filesystem and systemd namespace layout.
+The companion control plane is
+[`SeweS01/ai-session-control-center`](https://github.com/SeweS01/ai-session-control-center).
