@@ -1,5 +1,8 @@
 # AI Agent Runtime
 
+[![CI](https://github.com/sewes-ds/ai-agent-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/sewes-ds/ai-agent-runtime/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 AI Agent Runtime is the provider-agnostic execution and control layer between an
 unchanged Telegram Agent installation and AI CLI providers. Runtime V1 supervises
 Codex inside tmux while AI Session Control Center (CUS) supplies versioned desired
@@ -36,7 +39,7 @@ A secret-free example configuration is available at
 [`config/runtime.example.toml`](config/runtime.example.toml).
 
 The companion control plane is
-[`SeweS01/ai-session-control-center`](https://github.com/SeweS01/ai-session-control-center).
+[`sewes-ds/ai-session-control-center`](https://github.com/sewes-ds/ai-session-control-center).
 
 ## Contributing and license
 
