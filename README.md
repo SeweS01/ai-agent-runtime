@@ -37,3 +37,9 @@ A secret-free example configuration is available at
 
 The companion control plane is
 [`SeweS01/ai-session-control-center`](https://github.com/SeweS01/ai-session-control-center).
+
+## Contributing and license
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Report security
+issues according to [SECURITY.md](SECURITY.md). This project is available under the
+[MIT License](LICENSE), Copyright (c) 2026 SeweS-DS.

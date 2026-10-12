@@ -3,6 +3,7 @@ name = "ai-agent-runtime"
 version = "0.1.0"
 description = "Provider-agnostic local runtime for supervised AI CLI processes"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = []
 
