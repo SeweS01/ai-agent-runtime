@@ -217,6 +217,7 @@ class RuntimeServer:
         self._session_view_error: str | None = None
 
     async def serve(self) -> None:
+        self._refresh_effective_profile_attestations_once()
         self._project_session_view_once()
         _prepare_runtime_socket(self.config.socket_path)
         server = await asyncio.start_unix_server(self._handle, path=self.config.socket_path)
@@ -264,6 +265,36 @@ class RuntimeServer:
                     await retirement
             _unlink_runtime_socket(self.config.socket_path, socket_identity)
             self.store.close()
+
+    def _refresh_effective_profile_attestations_once(self) -> None:
+        """Migrate verified local profile identities to the stable v2 format."""
+
+        for (
+            binding_id,
+            spec_digest,
+            codex_home,
+            previous,
+        ) in self.store.effective_profile_attestations():
+            safe_home = validate_profile_path(codex_home, root=self.config.profiles_root)
+            current = profile_fingerprint(safe_home)
+            if current == previous:
+                continue
+            if not previous.startswith("sha256:"):
+                raise RuntimeFailureError(
+                    ErrorCode.UNSAFE_PROFILE,
+                    f"unsupported profile attestation for binding {binding_id}",
+                )
+            if not self.store.refresh_effective_profile_fingerprint(
+                binding_id=binding_id,
+                spec_digest=spec_digest,
+                codex_home=safe_home,
+                previous_fingerprint=previous,
+                profile_fingerprint=current,
+            ):
+                raise RuntimeFailureError(
+                    ErrorCode.AMBIGUOUS,
+                    f"profile attestation changed concurrently for binding {binding_id}",
+                )
 
     async def _handle(
         self,
@@ -1735,88 +1766,97 @@ class RuntimeServer:
 
     async def _collect_applied_evidence_loop(self) -> None:
         while True:
-            try:
-                states = read_tmux_states(self.config.tmux_state_path)
-                self._revoke_stale_applied_evidence(states)
-                for instance in self.store.pending_evidence_instances():
-                    binding = self.store.get_binding(instance.binding_id)
-                    if binding is None:
-                        continue
-                    matches = tuple(
-                        state
-                        for state in states
-                        if state.chat_id == binding.chat_id
-                        and state.thread_id == binding.thread_id
-                        and state.session_name == instance.tmux_session
-                        and state.provider == "codex"
-                        and Path(state.cwd).resolve() == Path(binding.canonical_cwd).resolve()
-                    )
-                    if len(matches) != 1:
-                        continue
-                    state = matches[0]
-                    if not state.session_id or not state.transcript_path:
-                        continue
-                    launch = instance.launch_spec
-                    raw_desired = launch.get("desired")
-                    if not isinstance(raw_desired, dict):
-                        continue
-                    spec = _desired_spec(raw_desired)
-                    codex_home = Path(_required_str(launch, "codex_home"))
-                    expected_fingerprint = _required_str(launch, "profile_fingerprint")
-                    if profile_fingerprint(codex_home) != expected_fingerprint:
-                        continue
-                    real_codex = Path(_required_str(launch, "real_codex"))
-                    expected_binary_digest = _required_str(launch, "real_codex_sha256")
-                    if file_sha256(real_codex) != expected_binary_digest:
-                        continue
-                    rollout_path = Path(state.transcript_path).resolve(strict=True)
-                    rollout_stat = rollout_path.stat()
-                    if not stat.S_ISREG(rollout_stat.st_mode):
-                        continue
-                    if rollout_stat.st_uid != os.getuid():
-                        continue
-                    process_evidence = self.child_verifier(
-                        child_pid=instance.child_pid,
-                        child_starttime=instance.child_starttime,
-                        wrapper_pid=instance.wrapper_pid,
-                        codex_home=codex_home,
-                        model=spec.model,
-                        reasoning_effort=spec.reasoning_effort,
-                        real_codex=real_codex,
-                    )
-                    evidence: dict[str, object] = {
-                        **process_evidence,
-                        "spec_digest": spec.spec_digest,
-                        "account_profile": spec.account_profile,
-                        "profile_fingerprint": expected_fingerprint,
-                        "real_codex_version": _required_str(launch, "real_codex_version"),
-                        "real_codex_sha256": expected_binary_digest,
-                        "session_id": state.session_id,
-                        "rollout_path": str(rollout_path),
-                        "rollout_device": rollout_stat.st_dev,
-                        "rollout_inode": rollout_stat.st_ino,
-                        "wrapper_pid": instance.wrapper_pid,
-                        "wrapper_starttime": instance.wrapper_starttime,
-                        "wrapper_identity": instance.launch_spec.get("wrapper_identity"),
-                        "daemon_boot_id": instance.daemon_boot_id,
-                        "connection_generation": instance.connection_generation,
-                        "tmux_session": instance.tmux_session,
-                        "tmux_pane": instance.tmux_pane,
-                    }
-                    self.store.record_applied_spec(
-                        instance_id=instance.instance_id,
-                        binding_id=instance.binding_id,
-                        spec=spec,
-                        evidence=evidence,
-                        session_id=state.session_id,
-                        account_profile=spec.account_profile,
-                        rollout_path=str(rollout_path),
-                        rollout_device=rollout_stat.st_dev,
-                        rollout_inode=rollout_stat.st_ino,
-                    )
-            except (OSError, ValueError, RuntimeFailureError):
-                pass
+            with contextlib.suppress(OSError, ValueError, RuntimeFailureError):
+                self._collect_applied_evidence_once()
             await asyncio.sleep(self.evidence_interval)
+
+    def _collect_applied_evidence_once(self) -> None:
+        states = read_tmux_states(self.config.tmux_state_path)
+        self._revoke_stale_applied_evidence(states)
+        for instance in self.store.pending_evidence_instances():
+            binding = self.store.get_binding(instance.binding_id)
+            if binding is None:
+                continue
+            matches = tuple(
+                state
+                for state in states
+                if state.chat_id == binding.chat_id
+                and state.thread_id == binding.thread_id
+                and state.session_name == instance.tmux_session
+                and state.provider == "codex"
+                and Path(state.cwd).resolve() == Path(binding.canonical_cwd).resolve()
+            )
+            if len(matches) != 1:
+                continue
+            state = matches[0]
+            if not state.session_id or not state.transcript_path:
+                continue
+            launch = instance.launch_spec
+            raw_desired = launch.get("desired")
+            if not isinstance(raw_desired, dict):
+                continue
+            spec = _desired_spec(raw_desired)
+            codex_home = Path(_required_str(launch, "codex_home"))
+            expected_fingerprint = _required_str(launch, "profile_fingerprint")
+            current_fingerprint = profile_fingerprint(codex_home)
+            profile_reattestation: tuple[str, str] | None = None
+            if current_fingerprint != expected_fingerprint:
+                if not expected_fingerprint.startswith("sha256:"):
+                    continue
+                profile_reattestation = (expected_fingerprint, current_fingerprint)
+                expected_fingerprint = current_fingerprint
+            if not expected_fingerprint.startswith("profile-v2:sha256:"):
+                continue
+            real_codex = Path(_required_str(launch, "real_codex"))
+            expected_binary_digest = _required_str(launch, "real_codex_sha256")
+            if file_sha256(real_codex) != expected_binary_digest:
+                continue
+            rollout_path = Path(state.transcript_path).resolve(strict=True)
+            rollout_stat = rollout_path.stat()
+            if not stat.S_ISREG(rollout_stat.st_mode):
+                continue
+            if rollout_stat.st_uid != os.getuid():
+                continue
+            process_evidence = self.child_verifier(
+                child_pid=instance.child_pid,
+                child_starttime=instance.child_starttime,
+                wrapper_pid=instance.wrapper_pid,
+                codex_home=codex_home,
+                model=spec.model,
+                reasoning_effort=spec.reasoning_effort,
+                real_codex=real_codex,
+            )
+            evidence: dict[str, object] = {
+                **process_evidence,
+                "spec_digest": spec.spec_digest,
+                "account_profile": spec.account_profile,
+                "profile_fingerprint": expected_fingerprint,
+                "real_codex_version": _required_str(launch, "real_codex_version"),
+                "real_codex_sha256": expected_binary_digest,
+                "session_id": state.session_id,
+                "rollout_path": str(rollout_path),
+                "rollout_device": rollout_stat.st_dev,
+                "rollout_inode": rollout_stat.st_ino,
+                "wrapper_pid": instance.wrapper_pid,
+                "wrapper_starttime": instance.wrapper_starttime,
+                "wrapper_identity": instance.launch_spec.get("wrapper_identity"),
+                "daemon_boot_id": instance.daemon_boot_id,
+                "connection_generation": instance.connection_generation,
+                "tmux_session": instance.tmux_session,
+                "tmux_pane": instance.tmux_pane,
+            }
+            self.store.record_applied_spec(
+                instance_id=instance.instance_id,
+                binding_id=instance.binding_id,
+                spec=spec,
+                evidence=evidence,
+                session_id=state.session_id,
+                account_profile=spec.account_profile,
+                rollout_path=str(rollout_path),
+                rollout_device=rollout_stat.st_dev,
+                rollout_inode=rollout_stat.st_ino,
+                profile_reattestation=profile_reattestation,
+            )
 
     def _revoke_stale_applied_evidence(self, states: tuple[UpstreamTmuxState, ...]) -> None:
         """Do not keep a previous rollout attached to a newly respawned child."""

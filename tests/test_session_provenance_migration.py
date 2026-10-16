@@ -134,7 +134,11 @@ def _seed_store(store: RuntimeStore, project: Path, profile: Path) -> None:
             expected_tmux_session="cc-n1001-42",
         )
     )
-    store.put_effective_spec(_spec(project), codex_home=profile, profile_fingerprint="fp")
+    store.put_effective_spec(
+        _spec(project),
+        codex_home=profile,
+        profile_fingerprint="sha256:" + "1" * 64,
+    )
 
 
 def test_plan_proves_exact_legacy_session_without_reading_transcript_body(

@@ -298,21 +298,37 @@ def validate_project_path(path: Path, *, allowed_roots: tuple[Path, ...]) -> Pat
 
 
 def profile_fingerprint(path: Path) -> str:
-    """Fingerprint profile identity/metadata without reading credential content."""
+    """Fingerprint the stable, safe identity of an account-profile directory.
+
+    Credential files are mutable by design: an authentication refresh may replace
+    ``auth.json`` or change its size and mtime without changing the configured
+    account-profile alias. The fingerprint therefore records only filesystem
+    identity and security properties, and never credential content or rotation
+    metadata.
+    """
 
     resolved = path.resolve(strict=True)
     profile_stat = resolved.stat()
     auth_path = resolved / "auth.json"
-    auth_metadata: tuple[int, int, int, int] | None = None
-    if auth_path.exists():
+    auth_metadata: tuple[int, int] | None = None
+    try:
         auth_stat = auth_path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        auth_stat = None
+    if auth_stat is not None:
         if stat.S_ISLNK(auth_stat.st_mode):
             raise RuntimeFailureError(ErrorCode.UNSAFE_PROFILE, "auth.json must not be a symlink")
+        if not stat.S_ISREG(auth_stat.st_mode):
+            raise RuntimeFailureError(ErrorCode.UNSAFE_PROFILE, "auth.json must be a regular file")
+        if auth_stat.st_uid != profile_stat.st_uid:
+            raise RuntimeFailureError(ErrorCode.UNSAFE_PROFILE, "auth.json has an unexpected owner")
+        if auth_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise RuntimeFailureError(
+                ErrorCode.UNSAFE_PROFILE, "auth.json must not be accessible by group/other"
+            )
         auth_metadata = (
             auth_stat.st_uid,
             stat.S_IMODE(auth_stat.st_mode),
-            auth_stat.st_size,
-            auth_stat.st_mtime_ns,
         )
     material = repr(
         (
@@ -324,7 +340,7 @@ def profile_fingerprint(path: Path) -> str:
             auth_metadata,
         )
     ).encode()
-    return f"sha256:{hashlib.sha256(material).hexdigest()}"
+    return f"profile-v2:sha256:{hashlib.sha256(material).hexdigest()}"
 
 
 def verify_codex_child(

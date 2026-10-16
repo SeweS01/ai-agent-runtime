@@ -184,6 +184,16 @@ profile fingerprint, parse both upstream config/state files, and prove exact
 binding/topic/active-tmux correlation. Its report includes
 `mutations_performed=false`; it neither repairs drift nor creates missing state.
 
+Profile fingerprints identify the configured profile directory and the safe
+owner/type/mode of `auth.json`; they deliberately do not include credential
+content, size, inode, or mtime. Normal credential rotation therefore keeps the
+same profile identity. On the first daemon start after upgrading from the legacy
+metadata fingerprint, Runtime compare-and-set migrates effective profile
+attestations. A live instance's launch attestation is migrated only while the
+ordinary applied-evidence collector can again prove its exact process, tmux,
+model, reasoning, binary and rollout identity; no wrapper or Codex process is
+signalled or replaced.
+
 # Migration M0 inventory
 
 Before switching `TELEGRAM_CODEX_BIN`, create a read-only baseline artifact for

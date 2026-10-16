@@ -729,6 +729,56 @@ class RuntimeStore:
             raise ValueError("persisted effective spec digest mismatch")
         return spec, Path(row["codex_home"]), row["profile_fingerprint"]
 
+    def effective_profile_attestations(self) -> tuple[tuple[str, str, Path, str], ...]:
+        """Return local profile attestations that may need a format migration."""
+
+        rows = self._connection.execute(
+            """
+            SELECT binding_id, spec_digest, codex_home, profile_fingerprint
+            FROM effective_specs
+            ORDER BY binding_id
+            """
+        ).fetchall()
+        return tuple(
+            (
+                str(row["binding_id"]),
+                str(row["spec_digest"]),
+                Path(row["codex_home"]),
+                str(row["profile_fingerprint"]),
+            )
+            for row in rows
+        )
+
+    def refresh_effective_profile_fingerprint(
+        self,
+        *,
+        binding_id: str,
+        spec_digest: str,
+        codex_home: Path,
+        previous_fingerprint: str,
+        profile_fingerprint: str,
+    ) -> bool:
+        """Compare-and-set one effective profile attestation without changing desire."""
+
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE effective_specs
+                SET profile_fingerprint=?, verified_at=?
+                WHERE binding_id=? AND spec_digest=? AND codex_home=?
+                  AND profile_fingerprint=?
+                """,
+                (
+                    profile_fingerprint,
+                    time.time(),
+                    binding_id,
+                    spec_digest,
+                    str(codex_home),
+                    previous_fingerprint,
+                ),
+            )
+        return cursor.rowcount == 1
+
     def get_launch_spec(self, binding_id: str) -> tuple[DesiredSpec, Path, str] | None:
         """Return authoritative desired plus the latest valid offline observed overlay."""
 
@@ -1207,6 +1257,7 @@ class RuntimeStore:
         rollout_path: str,
         rollout_device: int,
         rollout_inode: int,
+        profile_reattestation: tuple[str, str] | None = None,
     ) -> None:
         normalized_evidence = dict(evidence)
         normalized_evidence.setdefault("spec_digest", spec.spec_digest)
@@ -1215,6 +1266,40 @@ class RuntimeStore:
         normalized_evidence.setdefault("actual_reasoning_effort", spec.reasoning_effort)
         encoded = json.dumps(normalized_evidence, sort_keys=True, separators=(",", ":"))
         with self._connection:
+            if profile_reattestation is not None:
+                previous_fingerprint, current_fingerprint = profile_reattestation
+                row = self._connection.execute(
+                    """
+                    SELECT launch_spec_json FROM instances
+                    WHERE instance_id=? AND binding_id=?
+                    """,
+                    (instance_id, binding_id),
+                ).fetchone()
+                if row is None or row["launch_spec_json"] is None:
+                    raise KeyError(f"unknown attested instance: {instance_id}")
+                launch_spec = json.loads(row["launch_spec_json"])
+                if not isinstance(launch_spec, dict):
+                    raise ValueError("persisted instance launch spec is invalid")
+                if launch_spec.get("profile_fingerprint") != previous_fingerprint:
+                    raise ValueError("instance profile attestation changed concurrently")
+                raw_desired = launch_spec.get("desired")
+                if not isinstance(raw_desired, dict) or raw_desired.get("spec_digest") != (
+                    spec.spec_digest
+                ):
+                    raise ValueError("instance launch desire changed concurrently")
+                launch_spec["profile_fingerprint"] = current_fingerprint
+                self._connection.execute(
+                    """
+                    UPDATE instances SET launch_spec_json=?, updated_at=?
+                    WHERE instance_id=? AND binding_id=?
+                    """,
+                    (
+                        json.dumps(launch_spec, sort_keys=True, separators=(",", ":")),
+                        time.time(),
+                        instance_id,
+                        binding_id,
+                    ),
+                )
             existing = self.session_owner(session_id)
             expected_owner = (binding_id, account_profile)
             if existing is not None and existing != expected_owner:
